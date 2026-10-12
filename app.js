@@ -12,7 +12,7 @@ try {
 // ==================== State ====================
 let currentUser = null;
 let activeChat = null;
-let state = { contacts: {}, messages: {}, unread: {} };
+let state = { contacts: {}, messages: {} };
 let onlineIds = new Set();
 let msgChannel = null;
 let presenceChannel = null;
@@ -21,6 +21,7 @@ let lastTypingSent = 0;
 let searchTimer = null;
 let searchToken = 0;
 let entering = false;
+let lastRead = {}; // เวลาข้อความล่าสุดที่อ่านแล้ว แยกตามแชท
 
 // ==================== Helpers ====================
 function $(id) { return document.getElementById(id); }
@@ -105,8 +106,9 @@ async function enterApp(user) {
       username: user.user_metadata?.username || (user.email || 'user').split('@')[0],
       avatar: user.user_metadata?.avatar || ''
     };
-    state = { contacts: {}, messages: {}, unread: {} };
+    state = { contacts: {}, messages: {} };
     onlineIds = new Set();
+    lastRead = {};
 
     $('auth-section').classList.add('hidden-element');
     $('main-section').classList.remove('hidden-element');
@@ -131,7 +133,9 @@ function leaveApp() {
   unsubscribeRealtime();
   currentUser = null;
   activeChat = null;
-  state = { contacts: {}, messages: {}, unread: {} };
+  state = { contacts: {}, messages: {} };
+  lastRead = {};
+  updateBadges();
   $('main-section').classList.add('hidden-element');
   $('main-section').classList.remove('chat-open');
   $('auth-section').classList.remove('hidden-element');
@@ -142,6 +146,10 @@ window.addEventListener('DOMContentLoaded', async () => {
 
   document.addEventListener('keydown', e => {
     if (e.key === 'Escape') { toggleSearchModal(false); toggleSettingsModal(false); }
+  });
+
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden && activeChat) markRead(activeChat.id);
   });
 
   if (!sb) { toast('โหลด Supabase SDK ไม่สำเร็จ ตรวจสอบอินเทอร์เน็ตแล้วรีเฟรช', 'error'); return; }
@@ -389,6 +397,7 @@ async function loadInitialData() {
     profiles.forEach(p => { state.contacts[p.id] = p; });
   }
   saveContacts();
+  initLastRead();
 }
 
 // ==================== Realtime ====================
@@ -445,10 +454,17 @@ async function onIncoming(row) {
 
   if (!msg.isMe) {
     playSound('receive');
+    const viewing = activeChat && activeChat.id === partner && !document.hidden;
     if (activeChat && activeChat.id === partner) hideTyping();
-    else state.unread[partner] = (state.unread[partner] || 0) + 1;
+    if (!viewing) {
+      const who = state.contacts[partner].username;
+      toast(`ข้อความใหม่จาก ${who}: ${msg.text.slice(0, 40)}`, 'alert');
+    }
   }
-  if (activeChat && activeChat.id === partner) loadMessages();
+  if (activeChat && activeChat.id === partner) {
+    loadMessages();
+    if (!msg.isMe && !document.hidden) markRead(partner);
+  }
   loadChatList();
 }
 
@@ -486,6 +502,76 @@ setInterval(() => {
   if (changed) { if (activeChanged) loadMessages(); loadChatList(); }
 }, 1000);
 
+// ==================== ข้อความที่ยังไม่ได้อ่าน (ป้ายสีแดง) ====================
+function lastReadKey() { return 'darkchat_lastread_' + currentUser.id; }
+
+function saveLastRead() {
+  try { localStorage.setItem(lastReadKey(), JSON.stringify(lastRead)); } catch (e) { /* ignore */ }
+}
+
+function initLastRead() {
+  let raw = null;
+  try { raw = localStorage.getItem(lastReadKey()); } catch (e) { /* ignore */ }
+  if (raw === null) {
+    // ครั้งแรก: ถือว่าข้อความที่มีอยู่แล้วอ่านแล้ว จะได้ไม่ขึ้นเตือนทีเดียวเป็นร้อย
+    lastRead = {};
+    Object.keys(state.messages).forEach(id => {
+      const last = lastMessageOf(id);
+      if (last) lastRead[id] = last.ts;
+    });
+    saveLastRead();
+  } else {
+    try { lastRead = JSON.parse(raw) || {}; } catch (e) { lastRead = {}; }
+  }
+}
+
+function unreadOf(chatId) {
+  const since = lastRead[chatId] || 0;
+  return (state.messages[chatId] || []).filter(m => !m.isMe && m.ts > since).length;
+}
+
+function markRead(chatId) {
+  const last = lastMessageOf(chatId);
+  if (!last || (lastRead[chatId] || 0) >= last.ts) return;
+  lastRead[chatId] = last.ts;
+  saveLastRead();
+  loadChatList();
+}
+
+// อัปเดตเลขที่แท็บเบราว์เซอร์, ป้ายบนไอคอนแอป (ถ้าอุปกรณ์รองรับ) และป้ายบนปุ่มย้อนกลับ
+function updateBadges() {
+  let total = 0, others = 0;
+  if (currentUser) {
+    Object.keys(state.contacts).forEach(id => {
+      const n = unreadOf(id);
+      total += n;
+      if (!activeChat || activeChat.id !== id) others += n;
+    });
+  }
+  document.title = total > 0 ? `(${total > 99 ? '99+' : total}) DarkChat` : 'DarkChat';
+
+  try {
+    if (total > 0 && navigator.setAppBadge) navigator.setAppBadge(total).catch(() => {});
+    else if (navigator.clearAppBadge) navigator.clearAppBadge().catch(() => {});
+  } catch (e) { /* อุปกรณ์ไม่รองรับ */ }
+
+  const back = $('back-badge');
+  if (back) {
+    back.textContent = others > 99 ? '99+' : others;
+    back.classList.toggle('hidden-element', others === 0);
+  }
+}
+
+async function enableNotifications() {
+  if (!('Notification' in window)) {
+    return toast('อุปกรณ์นี้ยังไม่รองรับการแจ้งเตือน (บน iPhone ต้องเพิ่มแอปไว้ที่หน้าจอหลักก่อน)', 'error');
+  }
+  const result = await Notification.requestPermission();
+  toast(result === 'granted' ? 'เปิดการแจ้งเตือนแล้ว' : 'ยังไม่ได้อนุญาตการแจ้งเตือน',
+        result === 'granted' ? 'success' : 'error');
+  updateBadges();
+}
+
 // ==================== รายการแชท ====================
 function lastMessageOf(chatId) {
   const list = state.messages[chatId] || [];
@@ -495,6 +581,7 @@ function lastMessageOf(chatId) {
 function loadChatList(filtered = null) {
   const listEl = $('chat-list');
   listEl.innerHTML = '';
+  updateBadges();
 
   const chats = (filtered || Object.values(state.contacts)).slice().sort((a, b) => {
     const ta = lastMessageOf(a.id)?.ts || 0, tb = lastMessageOf(b.id)?.ts || 0;
@@ -511,7 +598,7 @@ function loadChatList(filtered = null) {
 
   chats.forEach(chat => {
     const last = lastMessageOf(chat.id);
-    const unread = state.unread[chat.id] || 0;
+    const unread = unreadOf(chat.id);
 
     const item = document.createElement('div');
     item.className = 'chat-item' + (activeChat?.id === chat.id ? ' active' : '');
@@ -656,7 +743,7 @@ function updateHeaderStatus() {
 
 function selectChat(chat) {
   activeChat = state.contacts[chat.id] || chat;
-  state.unread[activeChat.id] = 0;
+  markRead(activeChat.id);
   hideTyping();
 
   $('active-chat-title').textContent = activeChat.username;
