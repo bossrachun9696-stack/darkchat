@@ -376,9 +376,20 @@ button, input, select { font-size: 1rem; }
 .unread-badge {
   min-width: 20px; height: 20px; padding: 0 6px;
   display: grid; place-items: center;
-  border-radius: 10px; background: var(--grad); color: #fff;
+  border-radius: 10px; background: #ef4444; color: #fff;
   font-size: 0.72rem; font-weight: 600; flex-shrink: 0;
+  box-shadow: 0 0 10px rgba(239, 68, 68, 0.55);
 }
+.back-btn { position: relative; }
+.back-badge {
+  position: absolute; top: -2px; right: -4px;
+  min-width: 18px; height: 18px; padding: 0 5px;
+  display: grid; place-items: center;
+  border-radius: 9px; background: #ef4444; color: #fff;
+  font-size: 0.68rem; font-weight: 600;
+}
+.toast.alert { border-left-color: #ef4444; background: rgba(60, 20, 24, 0.96); }
+.notify-btn { margin-top: 2px; }
 .user-results { display: flex; flex-direction: column; gap: 4px; max-height: 280px; overflow-y: auto; min-height: 60px; }
 .user-hint { padding: 18px 8px; text-align: center; color: var(--text-muted); font-size: 0.88rem; }
 .user-row {
