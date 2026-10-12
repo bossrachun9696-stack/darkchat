@@ -1,0 +1,195 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <meta name="theme-color" content="#8b5cf6">
+  <title>DarkChat</title>
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="manifest" href="manifest.json">
+
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Prompt:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+
+  <!-- Supabase JS SDK -->
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+</head>
+<body data-theme="purple">
+
+  <div id="toast-stack" aria-live="polite"></div>
+
+  <div id="app-container">
+
+    <!-- 1. หน้าเข้าสู่ระบบ -->
+    <div id="auth-section" class="screen-section">
+      <div class="orb orb-1"></div>
+      <div class="orb orb-2"></div>
+
+      <div class="auth-card">
+        <div class="brand">
+          <div class="brand-mark">
+            <svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a8 8 0 0 1-11.6 7.1L4 20l1-4.5A8 8 0 1 1 21 12z"/></svg>
+          </div>
+          <h1 class="logo-title">DarkChat</h1>
+          <p class="logo-subtitle">แชทธีมมืด เรียบง่าย ใช้งานได้ทุกที่</p>
+        </div>
+
+        <div class="auth-tabs">
+          <button id="tab-login-btn" class="active-tab" type="button" onclick="switchAuthTab('login')">เข้าสู่ระบบ</button>
+          <button id="tab-register-btn" type="button" onclick="switchAuthTab('register')">สมัครสมาชิก</button>
+        </div>
+
+        <form id="login-form" onsubmit="handleLogin(event)">
+          <div class="input-group">
+            <label for="login-email">อีเมล</label>
+            <input type="email" id="login-email" placeholder="example@email.com" autocomplete="email" required>
+          </div>
+          <div class="input-group">
+            <label for="login-password">รหัสผ่าน</label>
+            <input type="password" id="login-password" placeholder="••••••••" autocomplete="current-password" required>
+          </div>
+          <button type="submit" class="primary-btn" id="login-btn">เข้าสู่ระบบ</button>
+        </form>
+
+        <form id="register-form" class="hidden-element" onsubmit="handleRegister(event)">
+          <div class="input-group">
+            <label for="reg-username">ชื่อผู้ใช้</label>
+            <input type="text" id="reg-username" placeholder="เช่น dark_user" autocomplete="username" maxlength="24" required>
+          </div>
+          <div class="input-group">
+            <label for="reg-email">อีเมล</label>
+            <input type="email" id="reg-email" placeholder="example@email.com" autocomplete="email" required>
+          </div>
+          <div class="input-group">
+            <label for="reg-password">รหัสผ่าน (อย่างน้อย 6 ตัว)</label>
+            <input type="password" id="reg-password" placeholder="••••••••" autocomplete="new-password" minlength="6" required>
+          </div>
+          <button type="submit" class="primary-btn" id="register-btn">สมัครสมาชิก</button>
+        </form>
+      </div>
+    </div>
+
+    <!-- 2. หน้าแชทหลัก -->
+    <div id="main-section" class="screen-section hidden-element">
+
+      <aside class="sidebar">
+        <div class="sidebar-header">
+          <div class="user-profile-summary">
+            <div class="avatar" id="my-avatar">D</div>
+            <div class="user-info">
+              <span id="my-username" class="username-display">กำลังโหลด...</span>
+              <div class="my-status"><span class="status-dot online"></span><span>ออนไลน์</span></div>
+            </div>
+          </div>
+          <div class="header-actions">
+            <button class="icon-btn" title="ตั้งค่า" aria-label="ตั้งค่า" onclick="toggleSettingsModal(true)">
+              <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>
+            </button>
+            <button class="icon-btn danger" title="ออกจากระบบ" aria-label="ออกจากระบบ" onclick="logout()">
+              <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="M16 17l5-5-5-5"/><path d="M21 12H9"/></svg>
+            </button>
+          </div>
+        </div>
+
+        <div class="search-box">
+          <input type="search" id="search-input" placeholder="ค้นหาแชทหรือข้อความ" oninput="filterChats()">
+        </div>
+
+        <div class="action-bar">
+          <button class="secondary-btn" onclick="toggleGroupModal(true)">+ สร้างกลุ่มใหม่</button>
+        </div>
+
+        <div class="chat-list" id="chat-list"></div>
+      </aside>
+
+      <main class="chat-area">
+        <div class="chat-header">
+          <button class="icon-btn back-btn" aria-label="กลับไปรายการแชท" onclick="backToList()">
+            <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg>
+          </button>
+          <div class="chat-header-info">
+            <div class="avatar" id="active-chat-avatar">💬</div>
+            <div>
+              <h3 id="active-chat-title">ยินดีต้อนรับสู่ DarkChat</h3>
+              <span id="active-chat-subtitle" class="subtitle">เลือกแชทเพื่อเริ่มสนทนา</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="messages-container" id="messages-container"></div>
+
+        <div id="typing-status" class="typing-indicator hidden-element"></div>
+
+        <form class="chat-input-area" onsubmit="sendMessage(event)">
+          <select id="auto-delete-timer" title="ตั้งเวลาลบข้อความอัตโนมัติ" aria-label="ลบข้อความอัตโนมัติ">
+            <option value="0">ไม่ลบ</option>
+            <option value="5">ลบใน 5 วิ</option>
+            <option value="10">ลบใน 10 วิ</option>
+            <option value="60">ลบใน 1 นาที</option>
+          </select>
+          <input type="text" id="message-input" placeholder="เลือกแชทเพื่อพิมพ์ข้อความ" autocomplete="off" maxlength="1000" disabled>
+          <button type="submit" class="send-btn" id="send-btn" aria-label="ส่ง" disabled>
+            <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 2L11 13"/><path d="M22 2l-7 20-4-9-9-4 20-7z"/></svg>
+          </button>
+        </form>
+      </main>
+    </div>
+  </div>
+
+  <!-- Modal สร้างกลุ่ม -->
+  <div id="group-modal" class="modal hidden-element" onclick="if(event.target===this)toggleGroupModal(false)">
+    <div class="modal-content">
+      <h3>สร้างกลุ่มสนทนาใหม่</h3>
+      <div class="input-group">
+        <label for="new-group-name">ชื่อกลุ่ม</label>
+        <input type="text" id="new-group-name" placeholder="เช่น แก๊งเกมเมอร์" maxlength="30">
+      </div>
+      <div class="modal-actions">
+        <button class="secondary-btn" onclick="toggleGroupModal(false)">ยกเลิก</button>
+        <button class="primary-btn" onclick="createNewGroup()">สร้างกลุ่ม</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal ตั้งค่า -->
+  <div id="settings-modal" class="modal hidden-element" onclick="if(event.target===this)toggleSettingsModal(false)">
+    <div class="modal-content">
+      <h3>ตั้งค่าโปรไฟล์และธีม</h3>
+
+      <div class="input-group">
+        <label for="edit-username">ชื่อผู้ใช้</label>
+        <input type="text" id="edit-username" placeholder="ชื่อผู้ใช้ใหม่" maxlength="24">
+      </div>
+
+      <div class="input-group">
+        <label for="edit-avatar-file">อัปโหลดรูปโปรไฟล์ (.jpg / .png)</label>
+        <input type="file" id="edit-avatar-file" accept="image/*">
+      </div>
+
+      <div class="input-group">
+        <label for="edit-avatar-url">หรือใส่ลิงก์รูป / อีโมจิ</label>
+        <input type="text" id="edit-avatar-url" placeholder="https://... หรืออีโมจิ เช่น 🦊">
+      </div>
+
+      <div class="input-group">
+        <label for="theme-selector">สีธีมแอป</label>
+        <select id="theme-selector" onchange="changeTheme(this.value)">
+          <option value="purple">นีออนม่วง</option>
+          <option value="cyan">ฟ้าไซเบอร์</option>
+          <option value="emerald">เขียวมรกต</option>
+          <option value="pink">ชมพูเรโทร</option>
+        </select>
+      </div>
+
+      <div class="modal-actions">
+        <button class="secondary-btn" onclick="toggleSettingsModal(false)">ยกเลิก</button>
+        <button class="primary-btn" id="save-profile-btn" onclick="saveProfile()">บันทึก</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
