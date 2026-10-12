@@ -2,6 +2,9 @@
 const SUPABASE_URL = 'https://ealxfgjuiwoewwxxyppu.supabase.co';
 const SUPABASE_ANON_KEY = 'sb_publishable_E3FljLn7ipcoNzfXds3T9A_o4pj4d7z';
 
+// กุญแจสาธารณะของ Web Push (VAPID Public Key) ใส่ในหน้าเว็บได้ ไม่เป็นความลับ
+const VAPID_PUBLIC_KEY = 'BER6LQz_eP4lom4aKw1ibGZosJGSxBqjIwKEt3E9AeTfP1ptzKXiyGh7kWw__ebwkN7ar34LbYT6dnEpdpIrmIg';
+
 let sb = null;
 try {
   sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
@@ -22,6 +25,8 @@ let searchTimer = null;
 let searchToken = 0;
 let entering = false;
 let lastRead = {}; // เวลาข้อความล่าสุดที่อ่านแล้ว แยกตามแชท
+let pendingChatId = new URLSearchParams(location.search).get('chat'); // เปิดจากการแจ้งเตือน
+let lastBadgeTotal = -1;
 
 // ==================== Helpers ====================
 function $(id) { return document.getElementById(id); }
@@ -55,8 +60,8 @@ function thaiError(error) {
 // ถ้ายังไม่ได้รัน supabase.sql จะแจ้งให้ทราบ
 function handleDbError(error) {
   const msg = (error && error.message) || '';
-  if ((error && error.code === '42P01') || /does not exist|schema cache|Could not find the table/i.test(msg)) {
-    toast('ยังไม่ได้สร้างตารางในฐานข้อมูล กรุณารันไฟล์ supabase.sql ใน SQL Editor ของ Supabase ก่อน', 'error');
+  if ((error && error.code === '42P01') || /does not exist|schema cache|Could not find the (table|function)/i.test(msg)) {
+    toast('ฐานข้อมูลยังตั้งค่าไม่ครบ กรุณารันไฟล์ supabase.sql และ supabase-push.sql ใน SQL Editor ของ Supabase', 'error');
   } else {
     toast(thaiError(error), 'error');
   }
@@ -122,6 +127,19 @@ async function enterApp(user) {
     await loadInitialData();
     subscribeRealtime();
     loadChatList();
+
+    // ผูกอุปกรณ์นี้กับบัญชีที่เพิ่งล็อกอิน เพื่อให้ได้รับ Push (ถ้าเคยอนุญาตไว้)
+    if (pushSupported() && Notification.permission === 'granted') {
+      savePushSubscription(false).catch(() => {});
+    }
+
+    // เปิดจากการกดการแจ้งเตือน -> ไปที่แชทนั้นเลย
+    if (pendingChatId) {
+      const id = pendingChatId;
+      pendingChatId = null;
+      history.replaceState(null, '', location.pathname);
+      openChatById(id);
+    }
   } catch (err) {
     handleDbError(err);
   } finally {
@@ -229,6 +247,13 @@ async function handleLogin(e) {
 
 async function logout() {
   unsubscribeRealtime();
+  // เลิกผูกอุปกรณ์นี้กับบัญชีเดิม จะได้ไม่ได้รับแจ้งเตือนของคนที่ออกจากระบบแล้ว
+  try {
+    if (pushSupported() && Notification.permission === 'granted') {
+      const sub = await getPushSubscription();
+      if (sub) await sb.from('push_subscriptions').delete().eq('endpoint', sub.endpoint);
+    }
+  } catch (e) { /* ไม่เป็นไร */ }
   try { await sb.auth.signOut(); } catch (err) { console.warn(err); }
   if (currentUser) leaveApp();
 }
@@ -550,10 +575,15 @@ function updateBadges() {
   }
   document.title = total > 0 ? `(${total > 99 ? '99+' : total}) DarkChat` : 'DarkChat';
 
-  try {
-    if (total > 0 && navigator.setAppBadge) navigator.setAppBadge(total).catch(() => {});
-    else if (navigator.clearAppBadge) navigator.clearAppBadge().catch(() => {});
-  } catch (e) { /* อุปกรณ์ไม่รองรับ */ }
+  if (total !== lastBadgeTotal) {
+    lastBadgeTotal = total;
+    try {
+      if (total > 0 && navigator.setAppBadge) navigator.setAppBadge(total).catch(() => {});
+      else if (navigator.clearAppBadge) navigator.clearAppBadge().catch(() => {});
+    } catch (e) { /* อุปกรณ์ไม่รองรับ */ }
+    // ให้ Service Worker รู้เลขจริง เพื่อบวกต่อเมื่อมี Push เข้ามาตอนปิดแอป
+    try { caches.open('darkchat-meta').then(c => c.put('badge', new Response(String(total)))); } catch (e) { /* ignore */ }
+  }
 
   const back = $('back-badge');
   if (back) {
@@ -562,14 +592,100 @@ function updateBadges() {
   }
 }
 
-async function enableNotifications() {
-  if (!('Notification' in window)) {
-    return toast('อุปกรณ์นี้ยังไม่รองรับการแจ้งเตือน (บน iPhone ต้องเพิ่มแอปไว้ที่หน้าจอหลักก่อน)', 'error');
+// ==================== Web Push (แจ้งเตือนตอนปิดแอป) ====================
+function pushSupported() {
+  return 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
+}
+
+function urlBase64ToUint8Array(base64) {
+  const pad = '='.repeat((4 - (base64.length % 4)) % 4);
+  const raw = atob((base64 + pad).replace(/-/g, '+').replace(/_/g, '/'));
+  return Uint8Array.from(raw, c => c.charCodeAt(0));
+}
+
+function swReady() {
+  return Promise.race([
+    navigator.serviceWorker.ready,
+    new Promise((_, reject) => setTimeout(() => reject(new Error('Service Worker ยังไม่พร้อม ลองรีเฟรชหน้าเว็บ')), 6000))
+  ]);
+}
+
+async function getPushSubscription() {
+  if (!pushSupported()) return null;
+  const reg = await swReady();
+  return reg.pushManager.getSubscription();
+}
+
+// บันทึกอุปกรณ์นี้ลงฐานข้อมูล (ให้เซิร์ฟเวอร์รู้ว่าต้องส่ง Push ไปที่ไหน)
+async function savePushSubscription(createIfMissing) {
+  const reg = await swReady();
+  let sub = await reg.pushManager.getSubscription();
+  if (!sub) {
+    if (!createIfMissing) return;
+    sub = await reg.pushManager.subscribe({
+      userVisibleOnly: true,
+      applicationServerKey: urlBase64ToUint8Array(VAPID_PUBLIC_KEY)
+    });
   }
-  const result = await Notification.requestPermission();
-  toast(result === 'granted' ? 'เปิดการแจ้งเตือนแล้ว' : 'ยังไม่ได้อนุญาตการแจ้งเตือน',
-        result === 'granted' ? 'success' : 'error');
-  updateBadges();
+  const json = sub.toJSON();
+  const { error } = await sb.rpc('register_push', {
+    p_endpoint: json.endpoint,
+    p_p256dh: json.keys.p256dh,
+    p_auth: json.keys.auth
+  });
+  if (error) throw error;
+}
+
+async function enablePush() {
+  const permission = await Notification.requestPermission();
+  if (permission !== 'granted') {
+    throw new Error('ยังไม่ได้อนุญาตการแจ้งเตือน ไปเปิดสิทธิ์ในการตั้งค่าของเบราว์เซอร์หรือ iPhone แล้วลองใหม่');
+  }
+  await savePushSubscription(true);
+  toast('เปิดการแจ้งเตือนแล้ว จะได้รับข้อความแม้ปิดแอป', 'success');
+}
+
+async function disablePush() {
+  const sub = await getPushSubscription();
+  if (sub) {
+    await sb.from('push_subscriptions').delete().eq('endpoint', sub.endpoint);
+    await sub.unsubscribe();
+  }
+  toast('ปิดการแจ้งเตือนแล้ว', 'success');
+}
+
+async function refreshNotifyButton() {
+  const btn = $('notify-btn');
+  if (!btn) return;
+  let on = false;
+  try {
+    on = pushSupported() && Notification.permission === 'granted' && !!(await getPushSubscription());
+  } catch (e) { /* ไม่เป็นไร */ }
+  btn.textContent = on ? 'ปิดการแจ้งเตือนข้อความใหม่' : 'เปิดการแจ้งเตือนข้อความใหม่';
+  btn.dataset.on = on ? '1' : '';
+}
+
+async function toggleNotifications() {
+  if (!pushSupported()) {
+    return toast('อุปกรณ์นี้ยังไม่รองรับ Push บน iPhone ต้องใช้ iOS 16.4 ขึ้นไป และเพิ่มแอปไว้ที่หน้าจอหลักก่อน (Safari > ปุ่มแชร์ > เพิ่มไปยังหน้าจอโฮม) แล้วเปิดแอปจากไอคอนนั้น', 'error');
+  }
+  const btn = $('notify-btn');
+  btn.disabled = true;
+  try {
+    if (btn.dataset.on) await disablePush();
+    else await enablePush();
+  } catch (err) {
+    handleDbError(err);
+  } finally {
+    btn.disabled = false;
+    refreshNotifyButton();
+  }
+}
+
+async function openChatById(id) {
+  if (!id || !currentUser) return;
+  if (!state.contacts[id]) await fetchContact(id);
+  if (state.contacts[id]) selectChat(state.contacts[id]);
 }
 
 // ==================== รายการแชท ====================
@@ -883,7 +999,7 @@ function hideTyping() {
 // ==================== ตั้งค่า / ธีม ====================
 function toggleSettingsModal(show) {
   $('settings-modal').classList.toggle('hidden-element', !show);
-  if (show) updateUserProfileUI();
+  if (show) { updateUserProfileUI(); refreshNotifyButton(); }
 }
 
 function changeTheme(name) {
@@ -899,5 +1015,9 @@ function changeTheme(name) {
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', () => {
     navigator.serviceWorker.register('./sw.js').catch(err => console.log('SW:', err));
+  });
+  // Service Worker ส่งข้อความมาบอกให้เปิดแชท (เมื่อกดการแจ้งเตือนตอนแอปเปิดอยู่)
+  navigator.serviceWorker.addEventListener('message', e => {
+    if (e.data && e.data.type === 'open-chat') openChatById(e.data.chatId);
   });
 }
