@@ -94,11 +94,11 @@
         </div>
 
         <div class="search-box">
-          <input type="search" id="search-input" placeholder="ค้นหาแชทหรือข้อความ" oninput="filterChats()">
+          <input type="search" id="search-input" placeholder="ค้นหาในรายการแชท" oninput="filterChats()">
         </div>
 
         <div class="action-bar">
-          <button class="secondary-btn" onclick="toggleGroupModal(true)">+ สร้างกลุ่มใหม่</button>
+          <button class="secondary-btn" onclick="toggleSearchModal(true)">+ ค้นหาเพื่อน</button>
         </div>
 
         <div class="chat-list" id="chat-list"></div>
@@ -129,7 +129,7 @@
             <option value="10">ลบใน 10 วิ</option>
             <option value="60">ลบใน 1 นาที</option>
           </select>
-          <input type="text" id="message-input" placeholder="เลือกแชทเพื่อพิมพ์ข้อความ" autocomplete="off" maxlength="1000" disabled>
+          <input type="text" id="message-input" placeholder="เลือกแชทเพื่อพิมพ์ข้อความ" autocomplete="off" maxlength="1000" oninput="handleTyping()" disabled>
           <button type="submit" class="send-btn" id="send-btn" aria-label="ส่ง" disabled>
             <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 2L11 13"/><path d="M22 2l-7 20-4-9-9-4 20-7z"/></svg>
           </button>
@@ -138,17 +138,17 @@
     </div>
   </div>
 
-  <!-- Modal สร้างกลุ่ม -->
-  <div id="group-modal" class="modal hidden-element" onclick="if(event.target===this)toggleGroupModal(false)">
+  <!-- Modal ค้นหาเพื่อน -->
+  <div id="search-modal" class="modal hidden-element" onclick="if(event.target===this)toggleSearchModal(false)">
     <div class="modal-content">
-      <h3>สร้างกลุ่มสนทนาใหม่</h3>
+      <h3>ค้นหาเพื่อน</h3>
       <div class="input-group">
-        <label for="new-group-name">ชื่อกลุ่ม</label>
-        <input type="text" id="new-group-name" placeholder="เช่น แก๊งเกมเมอร์" maxlength="30">
+        <label for="user-search-input">ชื่อผู้ใช้</label>
+        <input type="text" id="user-search-input" placeholder="พิมพ์อย่างน้อย 2 ตัวอักษร" autocomplete="off" maxlength="24" oninput="searchUsers()">
       </div>
+      <div id="user-search-results" class="user-results"></div>
       <div class="modal-actions">
-        <button class="secondary-btn" onclick="toggleGroupModal(false)">ยกเลิก</button>
-        <button class="primary-btn" onclick="createNewGroup()">สร้างกลุ่ม</button>
+        <button class="secondary-btn" onclick="toggleSearchModal(false)">ปิด</button>
       </div>
     </div>
   </div>
