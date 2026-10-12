@@ -1,10 +1,7 @@
 // ==================== ตั้งค่า Supabase ====================
-// คัดลอกค่าจาก Supabase Dashboard > Project Settings > API
-// (Project URL ต้องมีรูปแบบ https://<project-ref>.supabase.co)
 const SUPABASE_URL = 'https://ealxfgjuiwoewwxxyppu.supabase.co';
 const SUPABASE_ANON_KEY = 'sb_publishable_E3FljLn7ipcoNzfXds3T9A_o4pj4d7z';
 
-// หมายเหตุ: ไม่ตั้งชื่อตัวแปรว่า "supabase" เพราะชนกับ window.supabase ของ SDK
 let sb = null;
 try {
   sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
@@ -15,18 +12,15 @@ try {
 // ==================== State ====================
 let currentUser = null;
 let activeChat = null;
-let state = { chats: [], messages: {} };
-let botTypingTimeout = null;
-
-const BOT_REPLIES = [
-  'ได้เลยครับ 👍',
-  'น่าสนใจมากเลย เล่าต่อได้ไหม',
-  'เข้าใจแล้วครับ',
-  'ขอคิดดูก่อนนะ 🤔',
-  'ฮ่าๆ จริงด้วย',
-  'โอเค ตามนั้นเลย!',
-  'เดี๋ยวทักกลับนะครับ'
-];
+let state = { contacts: {}, messages: {}, unread: {} };
+let onlineIds = new Set();
+let msgChannel = null;
+let presenceChannel = null;
+let typingHideTimer = null;
+let lastTypingSent = 0;
+let searchTimer = null;
+let searchToken = 0;
+let entering = false;
 
 // ==================== Helpers ====================
 function $(id) { return document.getElementById(id); }
@@ -36,7 +30,7 @@ function toast(message, type = 'info') {
   el.className = `toast ${type}`;
   el.textContent = message;
   $('toast-stack').appendChild(el);
-  setTimeout(() => el.remove(), 4000);
+  setTimeout(() => el.remove(), 5000);
 }
 
 function setBusy(btn, busy, label) {
@@ -55,6 +49,16 @@ function thaiError(error) {
   if (/at least 6/i.test(msg)) return 'รหัสผ่านต้องยาวอย่างน้อย 6 ตัวอักษร';
   if (/rate limit/i.test(msg)) return 'ทำรายการบ่อยเกินไป กรุณารอสักครู่';
   return msg || 'เกิดข้อผิดพลาดที่ไม่ทราบสาเหตุ';
+}
+
+// ถ้ายังไม่ได้รัน supabase.sql จะแจ้งให้ทราบ
+function handleDbError(error) {
+  const msg = (error && error.message) || '';
+  if ((error && error.code === '42P01') || /does not exist|schema cache|Could not find the table/i.test(msg)) {
+    toast('ยังไม่ได้สร้างตารางในฐานข้อมูล กรุณารันไฟล์ supabase.sql ใน SQL Editor ของ Supabase ก่อน', 'error');
+  } else {
+    toast(thaiError(error), 'error');
+  }
 }
 
 function fmtClock(ts) {
@@ -79,8 +83,8 @@ function playSound(type) {
     const gain = audioCtx.createGain();
     osc.connect(gain);
     gain.connect(audioCtx.destination);
-
-    const [from, to] = type === 'delete' ? [300, 150] : [440, 880];
+    const tones = { send: [440, 880], delete: [300, 150], receive: [880, 660] };
+    const [from, to] = tones[type] || tones.send;
     osc.frequency.setValueAtTime(from, t);
     osc.frequency.exponentialRampToValueAtTime(to, t + 0.12);
     gain.gain.setValueAtTime(0.08, t);
@@ -90,76 +94,44 @@ function playSound(type) {
   } catch (e) { /* ไม่มีเสียงก็ไม่เป็นไร */ }
 }
 
-// ==================== เก็บข้อมูลแชทไว้ในเครื่อง (แยกตามผู้ใช้) ====================
-function storageKey() { return 'darkchat_data_' + currentUser.id; }
-
-function seedState() {
-  const now = Date.now();
-  return {
-    chats: [
-      { id: 'user2', username: 'DarkMaster', avatar: 'https://api.dicebear.com/7.x/bottts/svg?seed=DarkMaster', online: true, bot: true },
-      { id: 'user3', username: 'CyberPunk', avatar: 'https://api.dicebear.com/7.x/bottts/svg?seed=CyberPunk', online: false, bot: true }
-    ],
-    messages: {
-      user2: [{ id: 'm1', sender: 'DarkMaster', text: 'ยินดีต้อนรับสู่ DarkChat ครับ!', ts: now - 3 * 3600000, isMe: false }],
-      user3: [{ id: 'm2', sender: 'CyberPunk', text: 'พรุ่งนี้ว่างไหมครับ', ts: now - 26 * 3600000, isMe: false }]
-    }
-  };
-}
-
-function loadState() {
-  try {
-    const raw = localStorage.getItem(storageKey());
-    if (raw) { state = JSON.parse(raw); return; }
-  } catch (e) { console.warn('อ่านข้อมูลแชทไม่ได้ ใช้ค่าเริ่มต้นแทน', e); }
-  state = seedState();
-  saveState();
-}
-
-function saveState() {
-  try { localStorage.setItem(storageKey(), JSON.stringify(state)); } catch (e) { console.warn(e); }
-}
-
-// ลบข้อความที่หมดเวลาแล้ว (ทำงานทุกวินาที และตอนเปิดแอป)
-function pruneExpired() {
-  const now = Date.now();
-  let changed = false, activeChanged = false;
-  for (const chatId in state.messages) {
-    const before = state.messages[chatId].length;
-    state.messages[chatId] = state.messages[chatId].filter(m => !m.expiresAt || m.expiresAt > now);
-    if (state.messages[chatId].length !== before) {
-      changed = true;
-      if (activeChat && activeChat.id === chatId) activeChanged = true;
-    }
-  }
-  if (changed) {
-    saveState();
-    if (activeChanged) loadMessages();
-    loadChatList();
-  }
-}
-setInterval(() => { if (currentUser) pruneExpired(); }, 1000);
-
 // ==================== Auth ====================
-function enterApp(user) {
-  currentUser = {
-    id: user.id,
-    email: user.email,
-    username: user.user_metadata?.username || (user.email || 'user').split('@')[0],
-    avatar: user.user_metadata?.avatar || ''
-  };
-  loadState();
-  pruneExpired();
-  updateUserProfileUI();
-  $('auth-section').classList.add('hidden-element');
-  $('main-section').classList.remove('hidden-element');
-  loadChatList();
-  resetChatView();
+async function enterApp(user) {
+  if (entering) return;
+  entering = true;
+  try {
+    currentUser = {
+      id: user.id,
+      email: user.email,
+      username: user.user_metadata?.username || (user.email || 'user').split('@')[0],
+      avatar: user.user_metadata?.avatar || ''
+    };
+    state = { contacts: {}, messages: {}, unread: {} };
+    onlineIds = new Set();
+
+    $('auth-section').classList.add('hidden-element');
+    $('main-section').classList.remove('hidden-element');
+    $('main-section').classList.remove('chat-open');
+    updateUserProfileUI();
+    resetChatView();
+    $('chat-list').innerHTML = '<div class="chat-empty">กำลังโหลดแชท...</div>';
+
+    await loadMyProfile();
+    updateUserProfileUI();
+    await loadInitialData();
+    subscribeRealtime();
+    loadChatList();
+  } catch (err) {
+    handleDbError(err);
+  } finally {
+    entering = false;
+  }
 }
 
 function leaveApp() {
+  unsubscribeRealtime();
   currentUser = null;
   activeChat = null;
+  state = { contacts: {}, messages: {}, unread: {} };
   $('main-section').classList.add('hidden-element');
   $('main-section').classList.remove('chat-open');
   $('auth-section').classList.remove('hidden-element');
@@ -168,11 +140,9 @@ function leaveApp() {
 window.addEventListener('DOMContentLoaded', async () => {
   changeTheme(localStorage.getItem('darkchat_theme') || 'purple');
 
-  // ปิด modal ด้วยปุ่ม Esc
   document.addEventListener('keydown', e => {
-    if (e.key === 'Escape') { toggleGroupModal(false); toggleSettingsModal(false); }
+    if (e.key === 'Escape') { toggleSearchModal(false); toggleSettingsModal(false); }
   });
-  $('new-group-name').addEventListener('keydown', e => { if (e.key === 'Enter') createNewGroup(); });
 
   if (!sb) { toast('โหลด Supabase SDK ไม่สำเร็จ ตรวจสอบอินเทอร์เน็ตแล้วรีเฟรช', 'error'); return; }
 
@@ -217,7 +187,6 @@ async function handleRegister(e) {
       toast('สมัครสมาชิกสำเร็จ ยินดีต้อนรับ!', 'success');
       enterApp(data.session.user);
     } else {
-      // โปรเจกต์เปิดให้ยืนยันอีเมลก่อนเข้าสู่ระบบ
       toast('สมัครสำเร็จ! กรุณากดลิงก์ยืนยันในอีเมลก่อนเข้าสู่ระบบ', 'success');
       $('login-email').value = email;
       switchAuthTab('login');
@@ -251,11 +220,30 @@ async function handleLogin(e) {
 }
 
 async function logout() {
+  unsubscribeRealtime();
   try { await sb.auth.signOut(); } catch (err) { console.warn(err); }
   if (currentUser) leaveApp();
 }
 
-// ==================== Avatar / โปรไฟล์ ====================
+// ==================== โปรไฟล์ ====================
+async function loadMyProfile() {
+  const { data, error } = await sb.from('profiles')
+    .select('username, avatar').eq('id', currentUser.id).maybeSingle();
+  if (error) throw error;
+
+  if (data) {
+    currentUser.username = data.username;
+    currentUser.avatar = data.avatar || '';
+  } else {
+    // ยังไม่มีแถวโปรไฟล์ (เช่น สมัครก่อนรัน SQL) ให้สร้างเอง
+    await sb.from('profiles').insert({
+      id: currentUser.id,
+      username: currentUser.username.slice(0, 24),
+      avatar: currentUser.avatar && currentUser.avatar.length < 200000 ? currentUser.avatar : ''
+    });
+  }
+}
+
 function renderAvatar(el, avatarUrl, fallbackName) {
   if (!el) return;
   if (avatarUrl && (avatarUrl.startsWith('http') || avatarUrl.startsWith('data:'))) {
@@ -279,7 +267,6 @@ function updateUserProfileUI() {
   $('edit-avatar-file').value = '';
 }
 
-// ย่อรูปก่อนบันทึก เพื่อไม่ให้ข้อมูลโปรไฟล์ใหญ่เกินไป
 function resizeImage(file, size = 160) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -314,8 +301,14 @@ async function saveProfile() {
     if (file) avatar = await resizeImage(file);
     else if (textAvatar) avatar = textAvatar;
 
-    const { error } = await sb.auth.updateUser({ data: { username: newUsername, avatar } });
+    const { error } = await sb.from('profiles')
+      .update({ username: newUsername, avatar }).eq('id', currentUser.id);
     if (error) throw error;
+
+    // เก็บสำเนาไว้ใน metadata ของบัญชีด้วย (เฉพาะรูปที่ไม่ใหญ่เกินไป)
+    await sb.auth.updateUser({
+      data: { username: newUsername, avatar: avatar.length < 2000 ? avatar : '' }
+    });
 
     currentUser.username = newUsername;
     currentUser.avatar = avatar;
@@ -323,11 +316,175 @@ async function saveProfile() {
     toggleSettingsModal(false);
     toast('บันทึกโปรไฟล์เรียบร้อย', 'success');
   } catch (err) {
-    toast('บันทึกไม่สำเร็จ: ' + thaiError(err), 'error');
+    handleDbError(err);
   } finally {
     setBusy(btn, false);
   }
 }
+
+// ==================== โหลดข้อมูลแชท ====================
+function contactsKey() { return 'darkchat_contacts_' + currentUser.id; }
+
+function saveContacts() {
+  try { localStorage.setItem(contactsKey(), JSON.stringify(Object.keys(state.contacts))); } catch (e) { /* ignore */ }
+}
+
+function toLocal(row) {
+  const ts = new Date(row.created_at).getTime();
+  const exp = row.expires_at ? new Date(row.expires_at).getTime() : null;
+  return {
+    id: row.id,
+    text: row.text,
+    ts,
+    isMe: row.sender_id === currentUser.id,
+    expiresAt: exp,
+    timer: exp ? Math.round((exp - ts) / 1000) : null
+  };
+}
+
+// คืนค่า true ถ้าเพิ่มสำเร็จ, false ถ้ามีข้อความนี้อยู่แล้ว
+function addLocal(partnerId, msg) {
+  const list = state.messages[partnerId] || (state.messages[partnerId] = []);
+  if (list.some(m => m.id === msg.id)) return false;
+  list.push(msg);
+  list.sort((a, b) => a.ts - b.ts);
+  return true;
+}
+
+async function fetchContact(id) {
+  const { data } = await sb.from('profiles').select('id, username, avatar').eq('id', id).maybeSingle();
+  if (data) { state.contacts[id] = data; saveContacts(); }
+  return data;
+}
+
+async function loadInitialData() {
+  const me = currentUser.id;
+
+  // ลบข้อความของเราที่หมดเวลาแล้ว
+  await sb.from('messages').delete().eq('sender_id', me).lte('expires_at', new Date().toISOString());
+
+  const { data: rows, error } = await sb.from('messages')
+    .select('*')
+    .or(`sender_id.eq.${me},receiver_id.eq.${me}`)
+    .order('created_at', { ascending: false })
+    .limit(500);
+  if (error) { handleDbError(error); return; }
+
+  const now = Date.now();
+  const ids = new Set();
+  try { JSON.parse(localStorage.getItem(contactsKey()) || '[]').forEach(id => ids.add(id)); } catch (e) { /* ignore */ }
+
+  rows.forEach(row => {
+    const partner = row.sender_id === me ? row.receiver_id : row.sender_id;
+    const msg = toLocal(row);
+    if (msg.expiresAt && msg.expiresAt <= now) return;
+    ids.add(partner);
+    addLocal(partner, msg);
+  });
+
+  if (ids.size) {
+    const { data: profiles, error: pErr } = await sb.from('profiles')
+      .select('id, username, avatar').in('id', [...ids]);
+    if (pErr) { handleDbError(pErr); return; }
+    profiles.forEach(p => { state.contacts[p.id] = p; });
+  }
+  saveContacts();
+}
+
+// ==================== Realtime ====================
+function subscribeRealtime() {
+  unsubscribeRealtime();
+  const me = currentUser.id;
+
+  msgChannel = sb.channel('darkchat-messages-' + me)
+    .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'messages' },
+      payload => onIncoming(payload.new))
+    .on('postgres_changes', { event: 'DELETE', schema: 'public', table: 'messages' },
+      payload => onRemoteDelete(payload.old && payload.old.id))
+    .subscribe();
+
+  presenceChannel = sb.channel('darkchat-online', {
+    config: { presence: { key: me }, broadcast: { self: false } }
+  });
+  presenceChannel
+    .on('presence', { event: 'sync' }, () => {
+      onlineIds = new Set(Object.keys(presenceChannel.presenceState()));
+      onlineIds.delete(me);
+      updateHeaderStatus();
+      loadChatList();
+    })
+    .on('broadcast', { event: 'typing' }, ({ payload }) => {
+      if (payload && payload.to === me && activeChat && activeChat.id === payload.from) {
+        showTyping(activeChat.username);
+        clearTimeout(typingHideTimer);
+        typingHideTimer = setTimeout(hideTyping, 2500);
+      }
+    })
+    .subscribe(async status => {
+      if (status === 'SUBSCRIBED') await presenceChannel.track({ at: new Date().toISOString() });
+    });
+}
+
+function unsubscribeRealtime() {
+  if (msgChannel) { sb.removeChannel(msgChannel); msgChannel = null; }
+  if (presenceChannel) { sb.removeChannel(presenceChannel); presenceChannel = null; }
+}
+
+async function onIncoming(row) {
+  if (!currentUser || !row) return;
+  const me = currentUser.id;
+  const partner = row.sender_id === me ? row.receiver_id : row.sender_id;
+
+  if (!state.contacts[partner]) {
+    await fetchContact(partner);
+    if (!state.contacts[partner]) return;
+  }
+
+  const msg = toLocal(row);
+  if (!addLocal(partner, msg)) return; // ซ้ำกับที่เพิ่มตอนส่งเอง
+
+  if (!msg.isMe) {
+    playSound('receive');
+    if (activeChat && activeChat.id === partner) hideTyping();
+    else state.unread[partner] = (state.unread[partner] || 0) + 1;
+  }
+  if (activeChat && activeChat.id === partner) loadMessages();
+  loadChatList();
+}
+
+function onRemoteDelete(id) {
+  if (!id) return;
+  for (const chatId in state.messages) {
+    const before = state.messages[chatId].length;
+    state.messages[chatId] = state.messages[chatId].filter(m => m.id !== id);
+    if (state.messages[chatId].length !== before) {
+      if (activeChat && activeChat.id === chatId) loadMessages();
+      loadChatList();
+      return;
+    }
+  }
+}
+
+// ลบข้อความที่หมดเวลา (ข้อความของเราจะลบจากฐานข้อมูลด้วย)
+setInterval(() => {
+  if (!currentUser) return;
+  const now = Date.now();
+  let activeChanged = false, changed = false;
+  const ownIds = [];
+  for (const chatId in state.messages) {
+    const keep = [];
+    state.messages[chatId].forEach(m => {
+      if (m.expiresAt && m.expiresAt <= now) {
+        changed = true;
+        if (m.isMe) ownIds.push(m.id);
+        if (activeChat && activeChat.id === chatId) activeChanged = true;
+      } else keep.push(m);
+    });
+    state.messages[chatId] = keep;
+  }
+  if (ownIds.length) sb.from('messages').delete().in('id', ownIds).then(() => {});
+  if (changed) { if (activeChanged) loadMessages(); loadChatList(); }
+}, 1000);
 
 // ==================== รายการแชท ====================
 function lastMessageOf(chatId) {
@@ -339,21 +496,22 @@ function loadChatList(filtered = null) {
   const listEl = $('chat-list');
   listEl.innerHTML = '';
 
-  const chats = (filtered || state.chats).slice().sort((a, b) => {
+  const chats = (filtered || Object.values(state.contacts)).slice().sort((a, b) => {
     const ta = lastMessageOf(a.id)?.ts || 0, tb = lastMessageOf(b.id)?.ts || 0;
-    return tb - ta;
+    return (tb - ta) || a.username.localeCompare(b.username);
   });
 
   if (chats.length === 0) {
     const empty = document.createElement('div');
     empty.className = 'chat-empty';
-    empty.textContent = 'ไม่พบห้องแชท';
+    empty.textContent = filtered ? 'ไม่พบห้องแชท' : 'ยังไม่มีแชท กด "ค้นหาเพื่อน" เพื่อเริ่มคุยกับคนอื่น';
     listEl.appendChild(empty);
     return;
   }
 
   chats.forEach(chat => {
     const last = lastMessageOf(chat.id);
+    const unread = state.unread[chat.id] || 0;
 
     const item = document.createElement('div');
     item.className = 'chat-item' + (activeChat?.id === chat.id ? ' active' : '');
@@ -368,26 +526,33 @@ function loadChatList(filtered = null) {
 
     const top = document.createElement('div');
     top.className = 'chat-item-top';
-
     const name = document.createElement('span');
     name.className = 'chat-name';
     name.textContent = chat.username;
-    if (chat.online) {
+    if (onlineIds.has(chat.id)) {
       const dot = document.createElement('span');
       dot.className = 'status-dot online';
       name.appendChild(dot);
     }
-
     const time = document.createElement('span');
     time.className = 'chat-time';
     time.textContent = last ? fmtListTime(last.ts) : '';
+    top.append(name, time);
 
+    const bottom = document.createElement('div');
+    bottom.className = 'chat-bottom';
     const preview = document.createElement('div');
     preview.className = 'chat-preview';
-    preview.textContent = last ? last.text : 'ยังไม่มีข้อความ';
+    preview.textContent = last ? (last.isMe ? 'คุณ: ' : '') + last.text : 'เริ่มต้นการสนทนา';
+    bottom.appendChild(preview);
+    if (unread > 0) {
+      const badge = document.createElement('span');
+      badge.className = 'unread-badge';
+      badge.textContent = unread > 99 ? '99+' : unread;
+      bottom.appendChild(badge);
+    }
 
-    top.append(name, time);
-    info.append(top, preview);
+    info.append(top, bottom);
     item.append(avatar, info);
     listEl.appendChild(item);
   });
@@ -396,10 +561,79 @@ function loadChatList(filtered = null) {
 function filterChats() {
   const q = $('search-input').value.toLowerCase().trim();
   if (!q) return loadChatList();
-  loadChatList(state.chats.filter(chat =>
+  loadChatList(Object.values(state.contacts).filter(chat =>
     chat.username.toLowerCase().includes(q) ||
     (lastMessageOf(chat.id)?.text || '').toLowerCase().includes(q)
   ));
+}
+
+// ==================== ค้นหาเพื่อน ====================
+function toggleSearchModal(show) {
+  $('search-modal').classList.toggle('hidden-element', !show);
+  if (show) {
+    $('user-search-input').value = '';
+    setUserHint('พิมพ์ชื่อผู้ใช้ของเพื่อนเพื่อค้นหา');
+    setTimeout(() => $('user-search-input').focus(), 50);
+  }
+}
+
+function setUserHint(text) {
+  const box = $('user-search-results');
+  box.innerHTML = '';
+  const hint = document.createElement('div');
+  hint.className = 'user-hint';
+  hint.textContent = text;
+  box.appendChild(hint);
+}
+
+function searchUsers() {
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(runUserSearch, 300);
+}
+
+async function runUserSearch() {
+  if (!currentUser) return;
+  const q = $('user-search-input').value.trim().replace(/[%_\\,()]/g, '');
+  if (q.length < 2) return setUserHint('พิมพ์อย่างน้อย 2 ตัวอักษร');
+
+  const token = ++searchToken;
+  setUserHint('กำลังค้นหา...');
+  const { data, error } = await sb.from('profiles')
+    .select('id, username, avatar')
+    .ilike('username', `%${q}%`)
+    .neq('id', currentUser.id)
+    .limit(20);
+  if (token !== searchToken) return; // มีการพิมพ์ใหม่แล้ว
+  if (error) { setUserHint('ค้นหาไม่สำเร็จ'); return handleDbError(error); }
+  if (!data.length) return setUserHint('ไม่พบผู้ใช้ชื่อนี้');
+
+  const box = $('user-search-results');
+  box.innerHTML = '';
+  data.forEach(p => {
+    const row = document.createElement('div');
+    row.className = 'user-row';
+    const av = document.createElement('div');
+    av.className = 'avatar';
+    renderAvatar(av, p.avatar, p.username);
+    const name = document.createElement('span');
+    name.className = 'name';
+    name.textContent = p.username;
+    const btn = document.createElement('button');
+    btn.className = 'mini-btn';
+    btn.textContent = state.contacts[p.id] ? 'เปิดแชท' : 'เริ่มแชท';
+    btn.onclick = () => startChatWith(p);
+    row.append(av, name, btn);
+    box.appendChild(row);
+  });
+}
+
+function startChatWith(profile) {
+  state.contacts[profile.id] = profile;
+  saveContacts();
+  toggleSearchModal(false);
+  $('search-input').value = '';
+  loadChatList();
+  selectChat(profile);
 }
 
 // ==================== หน้าแชท ====================
@@ -410,29 +644,30 @@ function resetChatView() {
   $('message-input').disabled = true;
   $('send-btn').disabled = true;
   $('message-input').placeholder = 'เลือกแชทเพื่อพิมพ์ข้อความ';
-  $('typing-status').classList.add('hidden-element');
-  renderEmptyState('💬', 'เลือกแชทจากรายการด้านซ้าย<br>หรือสร้างกลุ่มใหม่เพื่อเริ่มคุยได้เลย');
+  hideTyping();
+  $('messages-container').innerHTML =
+    '<div class="empty-state"><div class="empty-icon">💬</div><p>เลือกแชทจากรายการ<br>หรือกด "ค้นหาเพื่อน" เพื่อเริ่มคุย</p></div>';
 }
 
-function renderEmptyState(icon, html) {
-  const c = $('messages-container');
-  c.innerHTML = `<div class="empty-state"><div class="empty-icon">${icon}</div><p>${html}</p></div>`;
+function updateHeaderStatus() {
+  if (!activeChat) return;
+  $('active-chat-subtitle').textContent = onlineIds.has(activeChat.id) ? 'ออนไลน์อยู่' : 'ออฟไลน์';
 }
 
 function selectChat(chat) {
-  activeChat = chat;
-  clearTimeout(botTypingTimeout);
-  $('typing-status').classList.add('hidden-element');
+  activeChat = state.contacts[chat.id] || chat;
+  state.unread[activeChat.id] = 0;
+  hideTyping();
 
-  $('active-chat-title').textContent = chat.username;
-  $('active-chat-subtitle').textContent = chat.group ? 'แชทกลุ่ม' : (chat.online ? 'ออนไลน์อยู่' : 'ออฟไลน์');
-  renderAvatar($('active-chat-avatar'), chat.avatar, chat.username);
+  $('active-chat-title').textContent = activeChat.username;
+  updateHeaderStatus();
+  renderAvatar($('active-chat-avatar'), activeChat.avatar, activeChat.username);
 
   $('message-input').disabled = false;
   $('send-btn').disabled = false;
-  $('message-input').placeholder = `พิมพ์ข้อความถึง ${chat.username}`;
+  $('message-input').placeholder = `พิมพ์ข้อความถึง ${activeChat.username}`;
 
-  $('main-section').classList.add('chat-open'); // มือถือ: สลับไปหน้าแชท
+  $('main-section').classList.add('chat-open');
   loadMessages();
   loadChatList();
   if (window.matchMedia('(min-width: 761px)').matches) $('message-input').focus();
@@ -449,7 +684,8 @@ function loadMessages() {
 
   const list = state.messages[activeChat.id] || [];
   if (list.length === 0) {
-    renderEmptyState('✨', 'ยังไม่มีข้อความ<br>ทักทายเป็นคนแรกได้เลย');
+    container.innerHTML =
+      '<div class="empty-state"><div class="empty-icon">✨</div><p>ยังไม่มีข้อความ<br>ทักทายเป็นคนแรกได้เลย</p></div>';
     return;
   }
 
@@ -465,15 +701,10 @@ function loadMessages() {
       del.textContent = '🗑️';
       del.onclick = () => deleteMessage(msg.id);
       bubble.appendChild(del);
-    } else if (activeChat.group) {
-      const who = document.createElement('span');
-      who.className = 'msg-sender';
-      who.textContent = msg.sender;
-      bubble.appendChild(who);
     }
 
     const text = document.createElement('span');
-    text.textContent = msg.text; // textContent ป้องกัน XSS
+    text.textContent = msg.text;
     bubble.appendChild(text);
 
     const meta = document.createElement('div');
@@ -495,57 +726,54 @@ function loadMessages() {
   container.scrollTop = container.scrollHeight;
 }
 
-function addMessage(chatId, msg) {
-  if (!state.messages[chatId]) state.messages[chatId] = [];
-  state.messages[chatId].push(msg);
-  saveState();
-}
-
-function sendMessage(e) {
+async function sendMessage(e) {
   e.preventDefault();
   const input = $('message-input');
   const text = input.value.trim();
   if (!text || !activeChat) return;
 
-  const seconds = parseInt($('auto-delete-timer').value, 10) || 0;
   const chat = activeChat;
-  const now = Date.now();
-
-  addMessage(chat.id, {
-    id: 'msg_' + now + '_' + Math.random().toString(36).slice(2, 6),
-    sender: currentUser.username,
-    text,
-    ts: now,
-    isMe: true,
-    timer: seconds || null,
-    expiresAt: seconds ? now + seconds * 1000 : null
-  });
-
+  const seconds = parseInt($('auto-delete-timer').value, 10) || 0;
   input.value = '';
-  playSound('send');
-  loadMessages();
-  loadChatList();
 
-  if (chat.bot) scheduleBotReply(chat);
+  const { data, error } = await sb.from('messages').insert({
+    sender_id: currentUser.id,
+    receiver_id: chat.id,
+    text,
+    expires_at: seconds ? new Date(Date.now() + seconds * 1000).toISOString() : null
+  }).select().single();
+
+  if (error) {
+    input.value = text; // ส่งไม่สำเร็จ คืนข้อความให้
+    return handleDbError(error);
+  }
+
+  addLocal(chat.id, toLocal(data));
+  playSound('send');
+  if (activeChat && activeChat.id === chat.id) loadMessages();
+  loadChatList();
 }
 
-function scheduleBotReply(chat) {
-  clearTimeout(botTypingTimeout);
-  botTypingTimeout = setTimeout(() => {
-    if (activeChat?.id === chat.id) showTyping(chat.username);
-    botTypingTimeout = setTimeout(() => {
-      addMessage(chat.id, {
-        id: 'bot_' + Date.now(),
-        sender: chat.username,
-        text: BOT_REPLIES[Math.floor(Math.random() * BOT_REPLIES.length)],
-        ts: Date.now(),
-        isMe: false
-      });
-      $('typing-status').classList.add('hidden-element');
-      if (activeChat?.id === chat.id) loadMessages();
-      loadChatList();
-    }, 1200 + Math.random() * 800);
-  }, 400);
+async function deleteMessage(msgId) {
+  if (!activeChat) return;
+  const { error } = await sb.from('messages').delete().eq('id', msgId);
+  if (error) return handleDbError(error);
+  state.messages[activeChat.id] = (state.messages[activeChat.id] || []).filter(m => m.id !== msgId);
+  playSound('delete');
+  loadMessages();
+  loadChatList();
+}
+
+// ==================== กำลังพิมพ์ ====================
+function handleTyping() {
+  if (!activeChat || !presenceChannel || !currentUser) return;
+  const now = Date.now();
+  if (now - lastTypingSent < 1500) return;
+  lastTypingSent = now;
+  presenceChannel.send({
+    type: 'broadcast', event: 'typing',
+    payload: { from: currentUser.id, to: activeChat.id }
+  });
 }
 
 function showTyping(name) {
@@ -560,37 +788,9 @@ function showTyping(name) {
   el.classList.remove('hidden-element');
 }
 
-function deleteMessage(msgId) {
-  if (!activeChat || !state.messages[activeChat.id]) return;
-  state.messages[activeChat.id] = state.messages[activeChat.id].filter(m => m.id !== msgId);
-  saveState();
-  playSound('delete');
-  loadMessages();
-  loadChatList();
-}
-
-// ==================== กลุ่ม ====================
-function toggleGroupModal(show) {
-  $('group-modal').classList.toggle('hidden-element', !show);
-  if (show) { $('new-group-name').value = ''; setTimeout(() => $('new-group-name').focus(), 50); }
-}
-
-function createNewGroup() {
-  const groupName = $('new-group-name').value.trim();
-  if (!groupName) return toast('กรุณากรอกชื่อกลุ่ม', 'error');
-
-  const id = 'group_' + Date.now();
-  const chat = { id, username: groupName, avatar: '👥', online: false, group: true };
-  state.chats.unshift(chat);
-  state.messages[id] = [{
-    id: 'm0_' + id, sender: 'ระบบ',
-    text: `สร้างกลุ่ม "${groupName}" เรียบร้อยแล้ว`,
-    ts: Date.now(), isMe: false
-  }];
-  saveState();
-
-  toggleGroupModal(false);
-  selectChat(chat);
+function hideTyping() {
+  clearTimeout(typingHideTimer);
+  $('typing-status').classList.add('hidden-element');
 }
 
 // ==================== ตั้งค่า / ธีม ====================
