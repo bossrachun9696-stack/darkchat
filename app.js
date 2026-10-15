@@ -54,14 +54,15 @@ function thaiError(error) {
   if (/already registered|already been registered/i.test(msg)) return 'อีเมลนี้ถูกใช้สมัครแล้ว';
   if (/at least 6/i.test(msg)) return 'รหัสผ่านต้องยาวอย่างน้อย 6 ตัวอักษร';
   if (/rate limit/i.test(msg)) return 'ทำรายการบ่อยเกินไป กรุณารอสักครู่';
+  if (/should be different|same as the old/i.test(msg)) return 'รหัสผ่านใหม่ต้องไม่ซ้ำกับรหัสเดิม';
   return msg || 'เกิดข้อผิดพลาดที่ไม่ทราบสาเหตุ';
 }
 
 // ถ้ายังไม่ได้รัน supabase.sql จะแจ้งให้ทราบ
 function handleDbError(error) {
   const msg = (error && error.message) || '';
-  if ((error && error.code === '42P01') || /does not exist|schema cache|Could not find the (table|function)/i.test(msg)) {
-    toast('ฐานข้อมูลยังตั้งค่าไม่ครบ กรุณารันไฟล์ supabase.sql และ supabase-push.sql ใน SQL Editor ของ Supabase', 'error');
+  if ((error && (error.code === '42P01' || error.code === '42703')) || /does not exist|schema cache|Could not find the (table|function)/i.test(msg)) {
+    toast('ฐานข้อมูลยังตั้งค่าไม่ครบ กรุณารันไฟล์ supabase.sql, supabase-push.sql และ supabase-phase-a.sql ใน SQL Editor ของ Supabase', 'error');
   } else {
     toast(thaiError(error), 'error');
   }
@@ -109,7 +110,10 @@ async function enterApp(user) {
       id: user.id,
       email: user.email,
       username: user.user_metadata?.username || (user.email || 'user').split('@')[0],
-      avatar: user.user_metadata?.avatar || ''
+      nickname: '',
+      avatar: user.user_metadata?.avatar || '',
+      searchId: null,
+      showName: true, showAvatar: true, showEmail: false, showId: true, showOnline: true
     };
     state = { contacts: {}, messages: {} };
     onlineIds = new Set();
@@ -149,6 +153,9 @@ async function enterApp(user) {
 
 function leaveApp() {
   unsubscribeRealtime();
+  hidePin();
+  toggleGearMenu(false);
+  document.querySelectorAll('.modal').forEach(m => m.classList.add('hidden-element'));
   currentUser = null;
   activeChat = null;
   state = { contacts: {}, messages: {} };
@@ -161,20 +168,15 @@ function leaveApp() {
 
 window.addEventListener('DOMContentLoaded', async () => {
   changeTheme(localStorage.getItem('darkchat_theme') || 'purple');
-
-  document.addEventListener('keydown', e => {
-    if (e.key === 'Escape') { toggleSearchModal(false); toggleSettingsModal(false); }
-  });
-
-  document.addEventListener('visibilitychange', () => {
-    if (!document.hidden && activeChat) markRead(activeChat.id);
-  });
+  changeMode(localStorage.getItem('darkchat_mode') || 'dark');
+  setupPasswordToggles();
+  setupGlobalListeners();
 
   if (!sb) { toast('โหลด Supabase SDK ไม่สำเร็จ ตรวจสอบอินเทอร์เน็ตแล้วรีเฟรช', 'error'); return; }
 
   try {
     const { data: { session } } = await sb.auth.getSession();
-    if (session) enterApp(session.user);
+    if (session) startSession(session.user, false);
   } catch (err) {
     toast(thaiError(err), 'error');
   }
@@ -183,6 +185,13 @@ window.addEventListener('DOMContentLoaded', async () => {
     if (event === 'SIGNED_OUT' && currentUser) leaveApp();
   });
 });
+
+// เริ่มใช้งานหลังยืนยันตัวตน: ยังไม่มี PIN -> ตั้ง PIN, มี PIN และเปิดแอปใหม่ -> ใส่ PIN
+function startSession(user, fresh) {
+  if (!hasPin(user.id)) showPin('create', user, () => enterApp(user));
+  else if (fresh) enterApp(user); // เพิ่งใส่รหัสผ่านมาเอง ไม่ต้องใส่ PIN ซ้ำ
+  else showPin('unlock', user, () => enterApp(user));
+}
 
 function switchAuthTab(tab) {
   $('login-form').classList.toggle('hidden-element', tab !== 'login');
@@ -211,7 +220,7 @@ async function handleRegister(e) {
 
     if (data.session) {
       toast('สมัครสมาชิกสำเร็จ ยินดีต้อนรับ!', 'success');
-      enterApp(data.session.user);
+      startSession(data.session.user, true);
     } else {
       toast('สมัครสำเร็จ! กรุณากดลิงก์ยืนยันในอีเมลก่อนเข้าสู่ระบบ', 'success');
       $('login-email').value = email;
@@ -237,7 +246,7 @@ async function handleLogin(e) {
     const { data, error } = await sb.auth.signInWithPassword({ email, password });
     if (error) throw error;
     $('login-password').value = '';
-    enterApp(data.user);
+    startSession(data.user, true);
   } catch (err) {
     toast('เข้าสู่ระบบไม่สำเร็จ: ' + thaiError(err), 'error');
   } finally {
@@ -245,7 +254,19 @@ async function handleLogin(e) {
   }
 }
 
-async function logout() {
+async function confirmLogout() {
+  toggleGearMenu(false);
+  const ok = await confirmDialog(
+    'ออกจากระบบ',
+    'ต้องการออกจากระบบใช่หรือไม่?\nครั้งหน้าต้องเข้าสู่ระบบด้วยรหัสผ่านและตั้ง PIN ใหม่',
+    'ออกจากระบบ', true
+  );
+  if (ok) await logoutNow();
+}
+
+async function logoutNow(userId) {
+  const uid = userId || (currentUser && currentUser.id);
+  if (uid) localStorage.removeItem(pinKey(uid));
   unsubscribeRealtime();
   // เลิกผูกอุปกรณ์นี้กับบัญชีเดิม จะได้ไม่ได้รับแจ้งเตือนของคนที่ออกจากระบบแล้ว
   try {
@@ -259,21 +280,39 @@ async function logout() {
 }
 
 // ==================== โปรไฟล์ ====================
+const PRIVACY = {
+  show_name: 'showName', show_avatar: 'showAvatar', show_email: 'showEmail',
+  show_id: 'showId', show_online: 'showOnline'
+};
+
+// ชื่อที่แสดงของคนอื่น: ถ้าเขาปิดชื่อผู้ใช้ จะใช้ชื่อเล่นแทน
+function nameOf(p) { return (p && (p.username || p.nickname)) || 'ผู้ใช้'; }
+
+function applyMyProfile(d) {
+  currentUser.username = d.username;
+  currentUser.nickname = d.nickname || d.username;
+  currentUser.avatar = d.avatar || '';
+  currentUser.searchId = d.search_id || null;
+  currentUser.showName = d.show_name !== false;
+  currentUser.showAvatar = d.show_avatar !== false;
+  currentUser.showEmail = d.show_email === true;
+  currentUser.showId = d.show_id !== false;
+  currentUser.showOnline = d.show_online !== false;
+}
+
 async function loadMyProfile() {
   const { data, error } = await sb.from('profiles')
-    .select('username, avatar').eq('id', currentUser.id).maybeSingle();
+    .select('username, nickname, avatar, search_id, show_name, show_avatar, show_email, show_id, show_online')
+    .eq('id', currentUser.id).maybeSingle();
   if (error) throw error;
 
   if (data) {
-    currentUser.username = data.username;
-    currentUser.avatar = data.avatar || '';
+    applyMyProfile(data);
   } else {
     // ยังไม่มีแถวโปรไฟล์ (เช่น สมัครก่อนรัน SQL) ให้สร้างเอง
-    await sb.from('profiles').insert({
-      id: currentUser.id,
-      username: currentUser.username.slice(0, 24),
-      avatar: currentUser.avatar && currentUser.avatar.length < 200000 ? currentUser.avatar : ''
-    });
+    const name = currentUser.username.slice(0, 24);
+    await sb.from('profiles').insert({ id: currentUser.id, username: name, nickname: name });
+    currentUser.nickname = name;
   }
 }
 
@@ -295,9 +334,24 @@ function updateUserProfileUI() {
   if (!currentUser) return;
   $('my-username').textContent = currentUser.username;
   renderAvatar($('my-avatar'), currentUser.avatar, currentUser.username);
-  $('edit-username').value = currentUser.username;
-  $('edit-avatar-url').value = currentUser.avatar && !currentUser.avatar.startsWith('data:') ? currentUser.avatar : '';
-  $('edit-avatar-file').value = '';
+  renderAvatar($('pf-avatar'), currentUser.avatar, currentUser.username);
+  $('pf-username').value = currentUser.username;
+  $('pf-nickname').value = currentUser.nickname || '';
+  $('pf-email').textContent = currentUser.email || '';
+  $('pf-show-name').checked = currentUser.showName;
+  $('pf-show-email').checked = currentUser.showEmail;
+  $('pf-show-id').checked = currentUser.showId;
+  $('pf-show-avatar').checked = currentUser.showAvatar;
+  $('pf-show-online').checked = currentUser.showOnline;
+  $('st-show-online').checked = currentUser.showOnline;
+  $('my-status-dot').classList.toggle('online', currentUser.showOnline);
+  $('my-status-text').textContent = currentUser.showOnline ? 'ออนไลน์' : 'ซ่อนสถานะ';
+
+  const hasId = !!currentUser.searchId;
+  $('pf-id-view').textContent = hasId ? '@' + currentUser.searchId : '';
+  $('pf-id-view').classList.toggle('hidden-element', !hasId);
+  $('pf-id-create').classList.toggle('hidden-element', hasId);
+  $('pf-id-switch').classList.toggle('hidden-element', !hasId);
 }
 
 function resizeImage(file, size = 160) {
@@ -321,37 +375,100 @@ function resizeImage(file, size = 160) {
   });
 }
 
-async function saveProfile() {
-  const newUsername = $('edit-username').value.trim();
-  const file = $('edit-avatar-file').files[0];
-  const textAvatar = $('edit-avatar-url').value.trim();
-  if (!newUsername) return toast('กรุณากรอกชื่อผู้ใช้', 'error');
+async function saveProfileNames() {
+  const username = $('pf-username').value.trim();
+  const nickname = $('pf-nickname').value.trim();
+  if (!username || !nickname) return toast('กรุณากรอกชื่อผู้ใช้และชื่อเล่น', 'error');
 
-  const btn = $('save-profile-btn');
+  const btn = $('save-names-btn');
   setBusy(btn, true, 'กำลังบันทึก...');
   try {
-    let avatar = currentUser.avatar;
-    if (file) avatar = await resizeImage(file);
-    else if (textAvatar) avatar = textAvatar;
-
-    const { error } = await sb.from('profiles')
-      .update({ username: newUsername, avatar }).eq('id', currentUser.id);
+    const { error } = await sb.from('profiles').update({ username, nickname }).eq('id', currentUser.id);
     if (error) throw error;
-
-    // เก็บสำเนาไว้ใน metadata ของบัญชีด้วย (เฉพาะรูปที่ไม่ใหญ่เกินไป)
-    await sb.auth.updateUser({
-      data: { username: newUsername, avatar: avatar.length < 2000 ? avatar : '' }
-    });
-
-    currentUser.username = newUsername;
-    currentUser.avatar = avatar;
+    currentUser.username = username;
+    currentUser.nickname = nickname;
     updateUserProfileUI();
-    toggleSettingsModal(false);
-    toast('บันทึกโปรไฟล์เรียบร้อย', 'success');
+    toast('บันทึกชื่อเรียบร้อย', 'success');
   } catch (err) {
     handleDbError(err);
   } finally {
     setBusy(btn, false);
+  }
+}
+
+async function updatePrivacy(column, value) {
+  const { error } = await sb.from('profiles').update({ [column]: value }).eq('id', currentUser.id);
+  if (error) { updateUserProfileUI(); return handleDbError(error); } // คืนสวิตช์กลับค่าเดิม
+  currentUser[PRIVACY[column]] = value;
+  if (column === 'show_online') { applyOnlineVisibility(); updateHeaderStatus(); loadChatList(); }
+  updateUserProfileUI();
+}
+
+// เปิด/ปิดการแสดงสถานะออนไลน์ให้เพื่อน
+function applyOnlineVisibility() {
+  if (!presenceChannel || !currentUser) return;
+  if (currentUser.showOnline) presenceChannel.track({ at: new Date().toISOString() });
+  else presenceChannel.untrack();
+}
+
+async function createSearchId() {
+  const id = $('pf-new-id').value.trim().toLowerCase();
+  if (!/^[a-z0-9_.]{4,20}$/.test(id)) {
+    return toast('ID ใช้ได้เฉพาะ a-z ตัวเลข _ . ยาว 4-20 ตัวอักษร', 'error');
+  }
+  const ok = await confirmDialog(
+    'สร้าง ID ค้นหา',
+    `ID ของคุณจะเป็น @${id}\nสร้างได้ครั้งเดียว และเปลี่ยนภายหลังไม่ได้\nยืนยันหรือไม่?`,
+    'ยืนยันสร้าง'
+  );
+  if (!ok) return;
+
+  const { error } = await sb.from('profiles').update({ search_id: id }).eq('id', currentUser.id);
+  if (error) {
+    if (error.code === '23505') return toast('ID นี้มีผู้ใช้แล้ว ลองตั้งชื่ออื่น', 'error');
+    if (/search_id_locked/.test(error.message)) return toast('คุณสร้าง ID ไปแล้ว เปลี่ยนไม่ได้', 'error');
+    if (/invalid_search_id/.test(error.message)) return toast('รูปแบบ ID ไม่ถูกต้อง', 'error');
+    return handleDbError(error);
+  }
+  currentUser.searchId = id;
+  $('pf-new-id').value = '';
+  updateUserProfileUI();
+  toast('สร้าง ID เรียบร้อย', 'success');
+}
+
+// ----- รูปโปรไฟล์: แตะเพื่อเลือก "ดูรูป" หรือ "เปลี่ยนรูป" -----
+function openAvatarSheet() { openModal('avatar-sheet'); }
+
+function viewAvatar() {
+  closeModal('avatar-sheet');
+  const a = currentUser.avatar;
+  if (a && (a.startsWith('http') || a.startsWith('data:'))) {
+    $('viewer-img').src = a;
+    openModal('image-viewer');
+  } else {
+    toast('ยังไม่มีรูปโปรไฟล์ กด "เปลี่ยนรูป" เพื่อเพิ่มรูป', 'info');
+  }
+}
+
+function pickAvatar() {
+  closeModal('avatar-sheet');
+  $('avatar-file').click();
+}
+
+async function changeAvatar(input) {
+  const file = input.files && input.files[0];
+  if (!file) return;
+  try {
+    const avatar = await resizeImage(file);
+    const { error } = await sb.from('profiles').update({ avatar }).eq('id', currentUser.id);
+    if (error) throw error;
+    currentUser.avatar = avatar;
+    updateUserProfileUI();
+    toast('เปลี่ยนรูปโปรไฟล์เรียบร้อย', 'success');
+  } catch (err) {
+    handleDbError(err);
+  } finally {
+    input.value = '';
   }
 }
 
@@ -385,7 +502,7 @@ function addLocal(partnerId, msg) {
 }
 
 async function fetchContact(id) {
-  const { data } = await sb.from('profiles').select('id, username, avatar').eq('id', id).maybeSingle();
+  const { data } = await sb.from('public_profiles').select('id, nickname, username, avatar, email, search_id').eq('id', id).maybeSingle();
   if (data) { state.contacts[id] = data; saveContacts(); }
   return data;
 }
@@ -416,8 +533,8 @@ async function loadInitialData() {
   });
 
   if (ids.size) {
-    const { data: profiles, error: pErr } = await sb.from('profiles')
-      .select('id, username, avatar').in('id', [...ids]);
+    const { data: profiles, error: pErr } = await sb.from('public_profiles')
+      .select('id, nickname, username, avatar, email, search_id').in('id', [...ids]);
     if (pErr) { handleDbError(pErr); return; }
     profiles.forEach(p => { state.contacts[p.id] = p; });
   }
@@ -449,13 +566,13 @@ function subscribeRealtime() {
     })
     .on('broadcast', { event: 'typing' }, ({ payload }) => {
       if (payload && payload.to === me && activeChat && activeChat.id === payload.from) {
-        showTyping(activeChat.username);
+        showTyping(nameOf(activeChat));
         clearTimeout(typingHideTimer);
         typingHideTimer = setTimeout(hideTyping, 2500);
       }
     })
     .subscribe(async status => {
-      if (status === 'SUBSCRIBED') await presenceChannel.track({ at: new Date().toISOString() });
+      if (status === 'SUBSCRIBED' && currentUser && currentUser.showOnline) await presenceChannel.track({ at: new Date().toISOString() });
     });
 }
 
@@ -482,7 +599,7 @@ async function onIncoming(row) {
     const viewing = activeChat && activeChat.id === partner && !document.hidden;
     if (activeChat && activeChat.id === partner) hideTyping();
     if (!viewing) {
-      const who = state.contacts[partner].username;
+      const who = nameOf(state.contacts[partner]);
       toast(`ข้อความใหม่จาก ${who}: ${msg.text.slice(0, 40)}`, 'alert');
     }
   }
@@ -655,29 +772,29 @@ async function disablePush() {
 }
 
 async function refreshNotifyButton() {
-  const btn = $('notify-btn');
-  if (!btn) return;
+  const sw = $('notify-switch');
+  if (!sw) return;
   let on = false;
   try {
     on = pushSupported() && Notification.permission === 'granted' && !!(await getPushSubscription());
   } catch (e) { /* ไม่เป็นไร */ }
-  btn.textContent = on ? 'ปิดการแจ้งเตือนข้อความใหม่' : 'เปิดการแจ้งเตือนข้อความใหม่';
-  btn.dataset.on = on ? '1' : '';
+  sw.checked = on;
 }
 
-async function toggleNotifications() {
+async function toggleNotifications(want) {
   if (!pushSupported()) {
+    refreshNotifyButton();
     return toast('อุปกรณ์นี้ยังไม่รองรับ Push บน iPhone ต้องใช้ iOS 16.4 ขึ้นไป และเพิ่มแอปไว้ที่หน้าจอหลักก่อน (Safari > ปุ่มแชร์ > เพิ่มไปยังหน้าจอโฮม) แล้วเปิดแอปจากไอคอนนั้น', 'error');
   }
-  const btn = $('notify-btn');
-  btn.disabled = true;
+  const sw = $('notify-switch');
+  sw.disabled = true;
   try {
-    if (btn.dataset.on) await disablePush();
-    else await enablePush();
+    if (want) await enablePush();
+    else await disablePush();
   } catch (err) {
     handleDbError(err);
   } finally {
-    btn.disabled = false;
+    sw.disabled = false;
     refreshNotifyButton();
   }
 }
@@ -701,7 +818,7 @@ function loadChatList(filtered = null) {
 
   const chats = (filtered || Object.values(state.contacts)).slice().sort((a, b) => {
     const ta = lastMessageOf(a.id)?.ts || 0, tb = lastMessageOf(b.id)?.ts || 0;
-    return (tb - ta) || a.username.localeCompare(b.username);
+    return (tb - ta) || nameOf(a).localeCompare(nameOf(b));
   });
 
   if (chats.length === 0) {
@@ -722,7 +839,7 @@ function loadChatList(filtered = null) {
 
     const avatar = document.createElement('div');
     avatar.className = 'avatar';
-    renderAvatar(avatar, chat.avatar, chat.username);
+    renderAvatar(avatar, chat.avatar, nameOf(chat));
 
     const info = document.createElement('div');
     info.className = 'chat-item-info';
@@ -731,8 +848,8 @@ function loadChatList(filtered = null) {
     top.className = 'chat-item-top';
     const name = document.createElement('span');
     name.className = 'chat-name';
-    name.textContent = chat.username;
-    if (onlineIds.has(chat.id)) {
+    name.textContent = nameOf(chat);
+    if (isOnline(chat.id)) {
       const dot = document.createElement('span');
       dot.className = 'status-dot online';
       name.appendChild(dot);
@@ -765,7 +882,7 @@ function filterChats() {
   const q = $('search-input').value.toLowerCase().trim();
   if (!q) return loadChatList();
   loadChatList(Object.values(state.contacts).filter(chat =>
-    chat.username.toLowerCase().includes(q) ||
+    nameOf(chat).toLowerCase().includes(q) ||
     (lastMessageOf(chat.id)?.text || '').toLowerCase().includes(q)
   ));
 }
@@ -801,26 +918,31 @@ async function runUserSearch() {
 
   const token = ++searchToken;
   setUserHint('กำลังค้นหา...');
-  const { data, error } = await sb.from('profiles')
-    .select('id, username, avatar')
-    .ilike('username', `%${q}%`)
-    .neq('id', currentUser.id)
-    .limit(20);
+  const { data, error } = await sb.rpc('search_profiles', { q });
   if (token !== searchToken) return; // มีการพิมพ์ใหม่แล้ว
   if (error) { setUserHint('ค้นหาไม่สำเร็จ'); return handleDbError(error); }
-  if (!data.length) return setUserHint('ไม่พบผู้ใช้ชื่อนี้');
+  if (!data || !data.length) return setUserHint('ไม่พบผู้ใช้ที่ตรงกับคำค้นหา');
 
   const box = $('user-search-results');
   box.innerHTML = '';
   data.forEach(p => {
     const row = document.createElement('div');
     row.className = 'user-row';
+
     const av = document.createElement('div');
     av.className = 'avatar';
-    renderAvatar(av, p.avatar, p.username);
+    renderAvatar(av, p.avatar, nameOf(p));
+
     const name = document.createElement('span');
     name.className = 'name';
-    name.textContent = p.username;
+    name.textContent = nameOf(p);
+    if (p.search_id) {
+      const sub = document.createElement('span');
+      sub.className = 'sub';
+      sub.textContent = '@' + p.search_id;
+      name.appendChild(sub);
+    }
+
     const btn = document.createElement('button');
     btn.className = 'mini-btn';
     btn.textContent = state.contacts[p.id] ? 'เปิดแชท' : 'เริ่มแชท';
@@ -852,9 +974,18 @@ function resetChatView() {
     '<div class="empty-state"><div class="empty-icon">💬</div><p>เลือกแชทจากรายการ<br>หรือกด "ค้นหาเพื่อน" เพื่อเริ่มคุย</p></div>';
 }
 
+// ถ้าเราปิดสถานะออนไลน์ของตัวเอง เราก็จะไม่เห็นสถานะออนไลน์ของคนอื่นด้วย
+function isOnline(id) {
+  return !!(currentUser && currentUser.showOnline && onlineIds.has(id));
+}
+
 function updateHeaderStatus() {
   if (!activeChat) return;
-  $('active-chat-subtitle').textContent = onlineIds.has(activeChat.id) ? 'ออนไลน์อยู่' : 'ออฟไลน์';
+  if (!currentUser || !currentUser.showOnline) {
+    $('active-chat-subtitle').textContent = '';
+    return;
+  }
+  $('active-chat-subtitle').textContent = isOnline(activeChat.id) ? 'ออนไลน์อยู่' : 'ออฟไลน์';
 }
 
 function selectChat(chat) {
@@ -862,13 +993,13 @@ function selectChat(chat) {
   markRead(activeChat.id);
   hideTyping();
 
-  $('active-chat-title').textContent = activeChat.username;
+  $('active-chat-title').textContent = nameOf(activeChat);
   updateHeaderStatus();
-  renderAvatar($('active-chat-avatar'), activeChat.avatar, activeChat.username);
+  renderAvatar($('active-chat-avatar'), activeChat.avatar, nameOf(activeChat));
 
   $('message-input').disabled = false;
   $('send-btn').disabled = false;
-  $('message-input').placeholder = `พิมพ์ข้อความถึง ${activeChat.username}`;
+  $('message-input').placeholder = `พิมพ์ข้อความถึง ${nameOf(activeChat)}`;
 
   $('main-section').classList.add('chat-open');
   loadMessages();
@@ -938,6 +1069,7 @@ async function sendMessage(e) {
   const chat = activeChat;
   const seconds = parseInt($('auto-delete-timer').value, 10) || 0;
   input.value = '';
+  input.focus(); // ให้คีย์บอร์ดบนมือถือยังเปิดอยู่ พิมพ์ต่อได้ทันที
 
   const { data, error } = await sb.from('messages').insert({
     sender_id: currentUser.id,
@@ -996,19 +1128,291 @@ function hideTyping() {
   $('typing-status').classList.add('hidden-element');
 }
 
-// ==================== ตั้งค่า / ธีม ====================
-function toggleSettingsModal(show) {
-  $('settings-modal').classList.toggle('hidden-element', !show);
-  if (show) { updateUserProfileUI(); refreshNotifyButton(); }
+// ==================== หน้าต่างและเมนู ====================
+function openModal(id) { $(id).classList.remove('hidden-element'); }
+function closeModal(id) { $(id).classList.add('hidden-element'); }
+
+function toggleGearMenu(force) {
+  const menu = $('gear-menu');
+  if (!menu) return;
+  const show = force !== undefined ? force : menu.classList.contains('hidden-element');
+  menu.classList.toggle('hidden-element', !show);
 }
 
+function openProfile() {
+  toggleGearMenu(false);
+  updateUserProfileUI();
+  openModal('profile-modal');
+}
+
+function openSettings() {
+  toggleGearMenu(false);
+  updateUserProfileUI();
+  refreshNotifyButton();
+  openModal('settings-modal');
+}
+
+// ----- กล่องยืนยัน -----
+let confirmResolve = null;
+
+function confirmDialog(title, message, okLabel = 'ยืนยัน', danger = false) {
+  return new Promise(resolve => {
+    if (confirmResolve) confirmResolve(false);
+    confirmResolve = resolve;
+    $('confirm-title').textContent = title;
+    $('confirm-message').textContent = message;
+    const ok = $('confirm-ok');
+    ok.textContent = okLabel;
+    ok.classList.toggle('danger-btn', danger);
+    openModal('confirm-modal');
+  });
+}
+
+function answerConfirm(value) {
+  closeModal('confirm-modal');
+  if (confirmResolve) { const r = confirmResolve; confirmResolve = null; r(value); }
+}
+
+// ----- เปลี่ยนรหัสผ่าน (ต้องใส่รหัสเดิม + ยืนยันทุกครั้ง) -----
+function openPasswordModal() {
+  closeModal('settings-modal');
+  ['pw-current', 'pw-new', 'pw-confirm'].forEach(id => { $(id).value = ''; });
+  openModal('pw-modal');
+  setTimeout(() => $('pw-current').focus(), 50);
+}
+
+async function submitPasswordChange() {
+  const current = $('pw-current').value;
+  const next = $('pw-new').value;
+  const again = $('pw-confirm').value;
+
+  if (!current || !next || !again) return toast('กรุณากรอกให้ครบทุกช่อง', 'error');
+  if (next.length < 6) return toast('รหัสผ่านใหม่ต้องยาวอย่างน้อย 6 ตัวอักษร', 'error');
+  if (next !== again) return toast('รหัสผ่านใหม่และช่องยืนยันไม่ตรงกัน', 'error');
+  if (next === current) return toast('รหัสผ่านใหม่ต้องไม่ซ้ำกับรหัสเดิม', 'error');
+
+  const ok = await confirmDialog('เปลี่ยนรหัสผ่าน', 'ยืนยันการเปลี่ยนรหัสผ่านใช่หรือไม่?', 'ยืนยัน');
+  if (!ok) return;
+
+  const btn = $('pw-submit-btn');
+  setBusy(btn, true, 'กำลังเปลี่ยน...');
+  try {
+    // ตรวจรหัสผ่านเดิมก่อน
+    const { error: authErr } = await sb.auth.signInWithPassword({ email: currentUser.email, password: current });
+    if (authErr) return toast('รหัสผ่านเดิมไม่ถูกต้อง', 'error');
+
+    const { error } = await sb.auth.updateUser({ password: next });
+    if (error) throw error;
+
+    closeModal('pw-modal');
+    toast('เปลี่ยนรหัสผ่านเรียบร้อยแล้ว', 'success');
+  } catch (err) {
+    toast('เปลี่ยนรหัสผ่านไม่สำเร็จ: ' + thaiError(err), 'error');
+  } finally {
+    setBusy(btn, false);
+  }
+}
+
+// ==================== ธีม ====================
 function changeTheme(name) {
   document.body.setAttribute('data-theme', name);
   localStorage.setItem('darkchat_theme', name);
   const selector = $('theme-selector');
   if (selector) selector.value = name;
+}
+
+function changeMode(mode) {
+  document.body.setAttribute('data-mode', mode);
+  localStorage.setItem('darkchat_mode', mode);
+  document.querySelectorAll('.mode-opt').forEach(b => b.classList.toggle('active', b.dataset.mode === mode));
   const meta = document.querySelector('meta[name="theme-color"]');
-  if (meta) meta.content = getComputedStyle(document.body).getPropertyValue('--accent-color').trim() || '#8b5cf6';
+  if (meta) meta.content = getComputedStyle(document.body).getPropertyValue('--bg-main').trim() || '#08080d';
+}
+
+// ==================== ปุ่มตาในช่องรหัสผ่าน ====================
+const EYE_SVG =
+  '<svg class="eye" viewBox="0 0 24 24"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>' +
+  '<svg class="eye-off" viewBox="0 0 24 24"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><path d="M1 1l22 22"/></svg>';
+
+function setupPasswordToggles() {
+  document.querySelectorAll('.pw-toggle').forEach(btn => {
+    btn.innerHTML = EYE_SVG;
+    btn.onclick = () => {
+      const input = $(btn.dataset.for);
+      const show = input.type === 'password';
+      input.type = show ? 'text' : 'password';
+      btn.classList.toggle('on', show);
+      btn.setAttribute('aria-label', show ? 'ซ่อนรหัสผ่าน' : 'แสดงรหัสผ่าน');
+    };
+  });
+}
+
+// ==================== PIN 6 หลัก ====================
+const PIN_LOCK_AFTER_MS = 30000; // ซ่อนแอปเกิน 30 วินาที ต้องใส่ PIN ใหม่
+const PIN_MAX_TRIES = 5;
+let pin = { mode: null, buffer: '', first: '', user: null, onDone: null, onCancel: null, tries: 0 };
+let hiddenAt = 0;
+
+function pinKey(id) { return 'darkchat_pin_' + id; }
+function hasPin(id) { return !!localStorage.getItem(pinKey(id)); }
+function bytesToB64(bytes) { return btoa(String.fromCharCode(...bytes)); }
+function b64ToBytes(str) { return Uint8Array.from(atob(str), c => c.charCodeAt(0)); }
+function pinIsOpen() { return !$('pin-screen').classList.contains('hidden-element'); }
+
+// เก็บแบบเข้ารหัสแฮช (PBKDF2) ไม่เก็บ PIN จริง
+async function hashPin(code, saltB64) {
+  const key = await crypto.subtle.importKey('raw', new TextEncoder().encode(code), 'PBKDF2', false, ['deriveBits']);
+  const bits = await crypto.subtle.deriveBits(
+    { name: 'PBKDF2', salt: b64ToBytes(saltB64), iterations: 150000, hash: 'SHA-256' }, key, 256);
+  return bytesToB64(new Uint8Array(bits));
+}
+
+async function savePin(id, code) {
+  const salt = bytesToB64(crypto.getRandomValues(new Uint8Array(16)));
+  const hash = await hashPin(code, salt);
+  localStorage.setItem(pinKey(id), JSON.stringify({ salt, hash }));
+}
+
+async function checkPin(id, code) {
+  try {
+    const saved = JSON.parse(localStorage.getItem(pinKey(id)));
+    return !!saved && (await hashPin(code, saved.salt)) === saved.hash;
+  } catch (e) { return false; }
+}
+
+function showPin(mode, user, onDone, onCancel = null) {
+  pin = { mode, buffer: '', first: '', user, onDone, onCancel, tries: 0 };
+  $('pin-error').textContent = '';
+  renderPin();
+  $('pin-screen').classList.remove('hidden-element');
+}
+
+function hidePin() { $('pin-screen').classList.add('hidden-element'); }
+
+function renderPin() {
+  const creating = pin.mode === 'create';
+  $('pin-title').textContent = creating ? (pin.first ? 'ยืนยัน PIN อีกครั้ง' : 'ตั้ง PIN 6 หลัก') : 'ใส่ PIN เพื่อเข้าใช้งาน';
+  $('pin-sub').textContent = creating
+    ? (pin.first ? 'ใส่ PIN เดิมซ้ำเพื่อยืนยัน' : 'ใช้ปลดล็อกแอปทุกครั้งที่เปิดใช้งาน')
+    : 'ยินดีต้อนรับกลับ';
+  $('pin-dots').querySelectorAll('i').forEach((dot, i) => dot.classList.toggle('on', i < pin.buffer.length));
+
+  const sec = $('pin-secondary');
+  if (pin.onCancel) { sec.textContent = 'ยกเลิก'; sec.classList.remove('hidden-element'); }
+  else if (!creating) { sec.textContent = 'ลืม PIN?'; sec.classList.remove('hidden-element'); }
+  else sec.classList.add('hidden-element');
+}
+
+function pinPress(digit) {
+  if (!pinIsOpen() || pin.buffer.length >= 6) return;
+  $('pin-error').textContent = '';
+  pin.buffer += digit;
+  renderPin();
+  if (pin.buffer.length === 6) setTimeout(pinSubmit, 120);
+}
+
+function pinDelete() {
+  if (!pinIsOpen()) return;
+  pin.buffer = pin.buffer.slice(0, -1);
+  renderPin();
+}
+
+function pinError(message) {
+  $('pin-error').textContent = message;
+  const dots = $('pin-dots');
+  dots.classList.remove('shake');
+  void dots.offsetWidth;
+  dots.classList.add('shake');
+  renderPin();
+}
+
+async function pinSubmit() {
+  const code = pin.buffer;
+  pin.buffer = '';
+  if (!(window.crypto && crypto.subtle)) {
+    renderPin();
+    return toast('เบราว์เซอร์นี้ใช้ PIN ไม่ได้ (ต้องเปิดผ่าน https)', 'error');
+  }
+
+  if (pin.mode === 'create') {
+    if (!pin.first) { pin.first = code; renderPin(); return; }
+    if (pin.first !== code) { pin.first = ''; return pinError('PIN ไม่ตรงกัน กรุณาตั้งใหม่'); }
+    await savePin(pin.user.id, code);
+    const done = pin.onDone;
+    hidePin();
+    toast('ตั้ง PIN เรียบร้อย', 'success');
+    if (done) done();
+    return;
+  }
+
+  // โหมดปลดล็อก
+  if (await checkPin(pin.user.id, code)) {
+    const done = pin.onDone;
+    hidePin();
+    if (done) done();
+    return;
+  }
+  pin.tries++;
+  if (pin.tries >= PIN_MAX_TRIES) {
+    const uid = pin.user.id;
+    hidePin();
+    toast('ใส่ PIN ผิดเกินกำหนด กรุณาเข้าสู่ระบบใหม่ด้วยรหัสผ่าน', 'error');
+    return logoutNow(uid);
+  }
+  pinError(`PIN ไม่ถูกต้อง (เหลือ ${PIN_MAX_TRIES - pin.tries} ครั้ง)`);
+}
+
+async function pinSecondary() {
+  if (pin.onCancel) { const cancel = pin.onCancel; hidePin(); cancel(); return; }
+  const ok = await confirmDialog(
+    'ลืม PIN',
+    'ต้องออกจากระบบ แล้วเข้าสู่ระบบด้วยรหัสผ่านใหม่เพื่อตั้ง PIN ใหม่\nต้องการดำเนินการต่อหรือไม่?',
+    'ออกจากระบบ', true
+  );
+  if (!ok) return;
+  const uid = pin.user.id;
+  hidePin();
+  await logoutNow(uid);
+}
+
+// เปลี่ยน PIN: ใส่ PIN เดิมก่อน แล้วตั้งอันใหม่
+function startChangePin() {
+  closeModal('settings-modal');
+  if (!hasPin(currentUser.id)) return showPin('create', currentUser, () => {});
+  const user = currentUser;
+  const cancel = () => {};
+  showPin('unlock', user, () => showPin('create', user, () => {}, cancel), cancel);
+}
+
+// ==================== ตัวดักฟังทั่วทั้งแอป ====================
+function setupGlobalListeners() {
+  document.addEventListener('keydown', e => {
+    if (pinIsOpen()) {
+      if (/^\d$/.test(e.key)) pinPress(e.key);
+      else if (e.key === 'Backspace') pinDelete();
+      return;
+    }
+    if (e.key === 'Escape') {
+      if (!$('confirm-modal').classList.contains('hidden-element')) return answerConfirm(false);
+      document.querySelectorAll('.modal').forEach(m => m.classList.add('hidden-element'));
+    }
+  });
+
+  // คลิกที่อื่น = ปิดเมนูฟันเฟือง
+  document.addEventListener('click', e => {
+    if (!e.target.closest('#gear-wrap')) toggleGearMenu(false);
+  });
+
+  // กลับมาเปิดแอปหลังซ่อนนานเกินกำหนด ต้องใส่ PIN อีกครั้ง
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) { hiddenAt = Date.now(); return; }
+    if (currentUser && hiddenAt && Date.now() - hiddenAt > PIN_LOCK_AFTER_MS &&
+        hasPin(currentUser.id) && !pinIsOpen()) {
+      showPin('unlock', currentUser, () => { if (activeChat) markRead(activeChat.id); });
+    }
+    hiddenAt = 0;
+    if (activeChat && !pinIsOpen()) markRead(activeChat.id);
+  });
 }
 
 // ==================== Service Worker ====================
