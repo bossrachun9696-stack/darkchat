@@ -55,6 +55,9 @@ function thaiError(error) {
   if (/at least 6/i.test(msg)) return 'รหัสผ่านต้องยาวอย่างน้อย 6 ตัวอักษร';
   if (/rate limit/i.test(msg)) return 'ทำรายการบ่อยเกินไป กรุณารอสักครู่';
   if (/should be different|same as the old/i.test(msg)) return 'รหัสผ่านใหม่ต้องไม่ซ้ำกับรหัสเดิม';
+  if (/too_many_new_chats/i.test(msg)) return 'เริ่มแชทกับคนใหม่ได้ไม่เกิน 20 คนต่อวัน';
+  if (/too_many_requests/i.test(msg)) return 'ส่งคำขอเป็นเพื่อนได้ไม่เกิน 20 ครั้งต่อวัน';
+  if (/row-level security/i.test(msg)) return 'ทำรายการไม่ได้ (ถ้ากำลังส่งข้อความ ผู้ใช้นี้อาจบล็อกคุณ)';
   return msg || 'เกิดข้อผิดพลาดที่ไม่ทราบสาเหตุ';
 }
 
@@ -62,7 +65,7 @@ function thaiError(error) {
 function handleDbError(error) {
   const msg = (error && error.message) || '';
   if ((error && (error.code === '42P01' || error.code === '42703')) || /does not exist|schema cache|Could not find the (table|function)/i.test(msg)) {
-    toast('ฐานข้อมูลยังตั้งค่าไม่ครบ กรุณารันไฟล์ supabase.sql, supabase-push.sql และ supabase-phase-a.sql ใน SQL Editor ของ Supabase', 'error');
+    toast('ฐานข้อมูลยังตั้งค่าไม่ครบ กรุณารันไฟล์ supabase.sql, supabase-push.sql, supabase-phase-a.sql และ supabase-phase-b.sql ใน SQL Editor ของ Supabase', 'error');
   } else {
     toast(thaiError(error), 'error');
   }
@@ -116,6 +119,7 @@ async function enterApp(user) {
       showName: true, showAvatar: true, showEmail: false, showId: true, showOnline: true
     };
     state = { contacts: {}, messages: {} };
+    social = emptySocial();
     onlineIds = new Set();
     lastRead = {};
 
@@ -128,9 +132,11 @@ async function enterApp(user) {
 
     await loadMyProfile();
     updateUserProfileUI();
+    await loadSocial();
     await loadInitialData();
     subscribeRealtime();
     loadChatList();
+    renderSocialUI();
 
     // ผูกอุปกรณ์นี้กับบัญชีที่เพิ่งล็อกอิน เพื่อให้ได้รับ Push (ถ้าเคยอนุญาตไว้)
     if (pushSupported() && Notification.permission === 'granted') {
@@ -159,6 +165,7 @@ function leaveApp() {
   currentUser = null;
   activeChat = null;
   state = { contacts: {}, messages: {} };
+  social = emptySocial();
   lastRead = {};
   updateBadges();
   $('main-section').classList.add('hidden-element');
@@ -528,6 +535,7 @@ async function loadInitialData() {
     const partner = row.sender_id === me ? row.receiver_id : row.sender_id;
     const msg = toLocal(row);
     if (msg.expiresAt && msg.expiresAt <= now) return;
+    if (social.cleared[partner] && msg.ts <= social.cleared[partner]) return;
     ids.add(partner);
     addLocal(partner, msg);
   });
@@ -552,6 +560,7 @@ function subscribeRealtime() {
       payload => onIncoming(payload.new))
     .on('postgres_changes', { event: 'DELETE', schema: 'public', table: 'messages' },
       payload => onRemoteDelete(payload.old && payload.old.id))
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'friendships' }, onFriendshipChange)
     .subscribe();
 
   presenceChannel = sb.channel('darkchat-online', {
@@ -595,10 +604,10 @@ async function onIncoming(row) {
   if (!addLocal(partner, msg)) return; // ซ้ำกับที่เพิ่มตอนส่งเอง
 
   if (!msg.isMe) {
-    playSound('receive');
+    if (!social.muted.has(partner)) playSound('receive');
     const viewing = activeChat && activeChat.id === partner && !document.hidden;
     if (activeChat && activeChat.id === partner) hideTyping();
-    if (!viewing) {
+    if (!viewing && !social.muted.has(partner)) {
       const who = nameOf(state.contacts[partner]);
       toast(`ข้อความใหม่จาก ${who}: ${msg.text.slice(0, 40)}`, 'alert');
     }
@@ -814,6 +823,7 @@ function lastMessageOf(chatId) {
 function loadChatList(filtered = null) {
   const listEl = $('chat-list');
   listEl.innerHTML = '';
+  openSwipe = null;
   updateBadges();
 
   const chats = (filtered || Object.values(state.contacts)).slice().sort((a, b) => {
@@ -835,7 +845,6 @@ function loadChatList(filtered = null) {
 
     const item = document.createElement('div');
     item.className = 'chat-item' + (activeChat?.id === chat.id ? ' active' : '');
-    item.onclick = () => selectChat(chat);
 
     const avatar = document.createElement('div');
     avatar.className = 'avatar';
@@ -874,7 +883,16 @@ function loadChatList(filtered = null) {
 
     info.append(top, bottom);
     item.append(avatar, info);
-    listEl.appendChild(item);
+
+    const wrap = document.createElement('div');
+    wrap.className = 'chat-item-wrap';
+    const del = document.createElement('button');
+    del.type = 'button';
+    del.className = 'swipe-del';
+    del.textContent = 'ลบ';
+    wrap.append(del, item);
+    attachSwipe(item, del, () => selectChat(chat), () => clearChat(chat.id));
+    listEl.appendChild(wrap);
   });
 }
 
@@ -947,12 +965,13 @@ async function runUserSearch() {
     btn.className = 'mini-btn';
     btn.textContent = state.contacts[p.id] ? 'เปิดแชท' : 'เริ่มแชท';
     btn.onclick = () => startChatWith(p);
-    row.append(av, name, btn);
+    row.append(av, name, friendChipFor(p.id), btn);
     box.appendChild(row);
   });
 }
 
 function startChatWith(profile) {
+  ['friends-modal', 'requests-modal', 'user-modal', 'person-sheet', 'blocked-modal'].forEach(closeModal);
   state.contacts[profile.id] = profile;
   saveContacts();
   toggleSearchModal(false);
@@ -963,6 +982,7 @@ function startChatWith(profile) {
 
 // ==================== หน้าแชท ====================
 function resetChatView() {
+  $('friend-banner').classList.add('hidden-element');
   $('active-chat-title').textContent = 'ยินดีต้อนรับสู่ DarkChat';
   $('active-chat-subtitle').textContent = 'เลือกแชทเพื่อเริ่มสนทนา';
   renderAvatar($('active-chat-avatar'), '💬', 'D');
@@ -1004,6 +1024,8 @@ function selectChat(chat) {
   $('main-section').classList.add('chat-open');
   loadMessages();
   loadChatList();
+  updateFriendBanner();
+  updateComposerState();
   if (window.matchMedia('(min-width: 761px)').matches) $('message-input').focus();
 }
 
@@ -1065,6 +1087,7 @@ async function sendMessage(e) {
   const input = $('message-input');
   const text = input.value.trim();
   if (!text || !activeChat) return;
+  if (social.blocked.has(activeChat.id)) return toast('คุณบล็อกผู้ใช้นี้ไว้ ปลดบล็อกก่อนจึงจะส่งข้อความได้', 'error');
 
   const chat = activeChat;
   const seconds = parseInt($('auto-delete-timer').value, 10) || 0;
@@ -1413,6 +1436,564 @@ function setupGlobalListeners() {
     hiddenAt = 0;
     if (activeChat && !pinIsOpen()) markRead(activeChat.id);
   });
+}
+
+// ==================== เพื่อน / บล็อก / รายงาน (เฟส B1) ====================
+let social = emptySocial();
+let reportTarget = null;
+let openSwipe = null;
+let friendsToken = 0;
+
+function emptySocial() {
+  return { friendships: [], blocked: new Set(), muted: new Set(), cleared: {}, profiles: {} };
+}
+
+const FRIEND_COLS = 'id, requester_id, addressee_id, status, created_at';
+const PROFILE_COLS = 'id, nickname, username, avatar, email, search_id';
+
+async function loadSocial() {
+  const [fr, bl, mu, cl] = await Promise.all([
+    sb.from('friendships').select(FRIEND_COLS),
+    sb.from('blocks').select('blocked_id'),
+    sb.from('chat_mutes').select('partner_id'),
+    sb.from('chat_clears').select('partner_id, cleared_at')
+  ]);
+  const err = fr.error || bl.error || mu.error || cl.error;
+  if (err) throw err;
+  social.friendships = fr.data || [];
+  social.blocked = new Set((bl.data || []).map(r => r.blocked_id));
+  social.muted = new Set((mu.data || []).map(r => r.partner_id));
+  social.cleared = {};
+  (cl.data || []).forEach(r => { social.cleared[r.partner_id] = new Date(r.cleared_at).getTime(); });
+}
+
+async function refreshFriendships() {
+  const { data, error } = await sb.from('friendships').select(FRIEND_COLS);
+  if (error) return handleDbError(error);
+  social.friendships = data || [];
+}
+
+// ---------- สถานะความเป็นเพื่อน ----------
+function friendInfo(id) {
+  const me = currentUser.id;
+  const row = social.friendships.find(f =>
+    (f.requester_id === me && f.addressee_id === id) || (f.requester_id === id && f.addressee_id === me));
+  if (!row) return { state: 'none' };
+  if (row.status === 'accepted') return { state: 'friends', row };
+  if (row.requester_id === me) return { state: 'sent', row };   // ถูกปฏิเสธก็แสดงเป็น "รอตอบรับ" (ไม่แจ้งผู้ส่ง)
+  if (row.status === 'pending') return { state: 'received', row };
+  return { state: 'none', row };                                // เราเคยปฏิเสธเขาไปแล้ว
+}
+
+function friendIds() {
+  const me = currentUser.id;
+  return social.friendships.filter(f => f.status === 'accepted')
+    .map(f => (f.requester_id === me ? f.addressee_id : f.requester_id));
+}
+function pendingIncoming() {
+  return social.friendships.filter(f => f.addressee_id === currentUser.id && f.status === 'pending');
+}
+function pendingOutgoing() {
+  return social.friendships.filter(f => f.requester_id === currentUser.id && f.status !== 'accepted');
+}
+
+function profileOf(id) { return state.contacts[id] || social.profiles[id] || null; }
+
+async function ensureProfiles(ids) {
+  const missing = ids.filter(id => !profileOf(id));
+  if (missing.length) {
+    const { data } = await sb.from('public_profiles').select(PROFILE_COLS).in('id', missing);
+    (data || []).forEach(p => { social.profiles[p.id] = p; });
+  }
+  return ids.map(profileOf).filter(Boolean);
+}
+
+// ---------- การกระทำเกี่ยวกับเพื่อน ----------
+async function afterSocialChange() {
+  await refreshFriendships();
+  renderSocialUI();
+  if (!$('search-modal').classList.contains('hidden-element')) runUserSearch();
+}
+
+async function sendFriendRequest(id) {
+  const { data, error } = await sb.rpc('send_friend_request', { p_to: id });
+  if (error) return handleDbError(error);
+  const texts = {
+    sent: 'ส่งคำขอเป็นเพื่อนแล้ว', accepted: 'เป็นเพื่อนกันแล้ว',
+    already_friends: 'เป็นเพื่อนกันอยู่แล้ว', pending: 'ส่งคำขอไปแล้ว รอการตอบรับอยู่'
+  };
+  toast(texts[data] || 'เรียบร้อย', data === 'accepted' ? 'success' : 'info');
+  await afterSocialChange();
+}
+
+async function respondRequest(id, accept) {
+  const { error } = await sb.rpc('respond_friend_request', { p_from: id, p_accept: accept });
+  if (error) return handleDbError(error);
+  toast(accept ? 'ยอมรับคำขอเป็นเพื่อนแล้ว' : 'ปฏิเสธคำขอแล้ว', accept ? 'success' : 'info');
+  await afterSocialChange();
+}
+
+async function cancelRequest(id) {
+  const { error } = await sb.rpc('cancel_friend_request', { p_to: id });
+  if (error) return handleDbError(error);
+  toast('ยกเลิกคำขอแล้ว', 'info');
+  await afterSocialChange();
+}
+
+async function removeFriendConfirm(id) {
+  const ok = await confirmDialog(
+    'ลบเพื่อน',
+    `ต้องการลบ ${nameOf(profileOf(id))} ออกจากรายชื่อเพื่อนใช่หรือไม่?\nข้อความในแชทยังอยู่เหมือนเดิม`,
+    'ลบเพื่อน', true);
+  if (!ok) return;
+  const { error } = await sb.rpc('remove_friend', { p_friend: id });
+  if (error) return handleDbError(error);
+  toast('ลบเพื่อนแล้ว', 'info');
+  await afterSocialChange();
+}
+
+async function toggleMute(id) {
+  const muted = social.muted.has(id);
+  const { error } = muted
+    ? await sb.from('chat_mutes').delete().eq('partner_id', id)
+    : await sb.from('chat_mutes').insert({ partner_id: id });
+  if (error) return handleDbError(error);
+  if (muted) social.muted.delete(id); else social.muted.add(id);
+  toast(muted ? 'เปิดเสียงแจ้งเตือนแล้ว' : 'ปิดเสียงแจ้งเตือนของแชทนี้แล้ว', 'success');
+  renderSocialUI();
+}
+
+async function toggleBlock(id) {
+  if (social.blocked.has(id)) {
+    const { error } = await sb.from('blocks').delete().eq('blocked_id', id);
+    if (error) return handleDbError(error);
+    social.blocked.delete(id);
+    toast('ปลดบล็อกแล้ว', 'success');
+  } else {
+    const ok = await confirmDialog(
+      'บล็อกผู้ใช้',
+      `บล็อก ${nameOf(profileOf(id))} ใช่หรือไม่?\nเขาจะส่งข้อความหาคุณและค้นหาคุณไม่ได้\nปลดบล็อกได้ในการตั้งค่า`,
+      'บล็อก', true);
+    if (!ok) return;
+    const { error } = await sb.from('blocks').insert({ blocked_id: id });
+    if (error) return handleDbError(error);
+    social.blocked.add(id);
+    toast('บล็อกแล้ว', 'success');
+  }
+  updateComposerState();
+  renderSocialUI();
+}
+
+// ถ้าเราบล็อกอีกฝั่งอยู่ จะพิมพ์ส่งข้อความไม่ได้
+function updateComposerState() {
+  if (!activeChat) return;
+  const blocked = social.blocked.has(activeChat.id);
+  $('message-input').disabled = blocked;
+  $('send-btn').disabled = blocked;
+  $('message-input').placeholder = blocked
+    ? 'คุณบล็อกผู้ใช้นี้ไว้ ปลดบล็อกเพื่อส่งข้อความ'
+    : `พิมพ์ข้อความถึง ${nameOf(activeChat)}`;
+}
+
+// ---------- รายงาน ----------
+function openReport(id) {
+  reportTarget = id;
+  $('report-reason').selectedIndex = 0;
+  $('report-details').value = '';
+  openModal('report-modal');
+}
+
+async function submitReport() {
+  if (!reportTarget) return;
+  const btn = $('report-submit-btn');
+  setBusy(btn, true, 'กำลังส่ง...');
+  const { error } = await sb.from('reports').insert({
+    reported_id: reportTarget,
+    reason: $('report-reason').value,
+    details: $('report-details').value.trim() || null
+  });
+  setBusy(btn, false);
+  if (error) return handleDbError(error);
+  closeModal('report-modal');
+  toast('ส่งรายงานแล้ว ขอบคุณที่แจ้ง', 'success');
+}
+
+// ---------- ตัวช่วยสร้างปุ่ม/แถว ----------
+function chip(label, onClick, cls = '') {
+  const b = document.createElement('button');
+  b.type = 'button';
+  b.className = 'chip ' + cls;
+  b.textContent = label;
+  b.onclick = onClick;
+  return b;
+}
+
+function actionBtn(label, onClick, cls = 'secondary-btn') {
+  const b = document.createElement('button');
+  b.type = 'button';
+  b.className = cls;
+  b.textContent = label;
+  b.onclick = onClick;
+  return b;
+}
+
+function hintNode(text) {
+  const d = document.createElement('div');
+  d.className = 'user-hint';
+  d.textContent = text;
+  return d;
+}
+
+function personRow(p, sub) {
+  const row = document.createElement('div');
+  row.className = 'user-row';
+  const av = document.createElement('div');
+  av.className = 'avatar';
+  renderAvatar(av, p.avatar, nameOf(p));
+  const name = document.createElement('span');
+  name.className = 'name';
+  name.textContent = nameOf(p);
+  if (sub) {
+    const s = document.createElement('span');
+    s.className = 'sub';
+    s.textContent = sub;
+    name.appendChild(s);
+  }
+  row.append(av, name);
+  return row;
+}
+
+function friendChipFor(id) {
+  const info = friendInfo(id);
+  const b = document.createElement('button');
+  b.type = 'button';
+  b.className = 'mini-btn ghost';
+  if (info.state === 'friends') { b.textContent = 'เพื่อนแล้ว'; b.disabled = true; }
+  else if (info.state === 'sent') { b.textContent = 'รอตอบรับ'; b.disabled = true; }
+  else if (info.state === 'received') { b.textContent = 'ยอมรับ'; b.onclick = () => respondRequest(id, true); }
+  else { b.textContent = '+ เพื่อน'; b.onclick = () => sendFriendRequest(id); }
+  return b;
+}
+
+// ---------- แถบด้านบนห้องแชท (เมื่อยังไม่ได้เป็นเพื่อน) ----------
+function bannerKey() { return 'darkchat_banner_off_' + currentUser.id; }
+function bannerDismissed(id) {
+  try { return JSON.parse(localStorage.getItem(bannerKey()) || '[]').includes(id); } catch (e) { return false; }
+}
+function dismissBanner(id) {
+  let list = [];
+  try { list = JSON.parse(localStorage.getItem(bannerKey()) || '[]'); } catch (e) { /* ignore */ }
+  if (!list.includes(id)) list.push(id);
+  try { localStorage.setItem(bannerKey(), JSON.stringify(list)); } catch (e) { /* ignore */ }
+  updateFriendBanner();
+}
+
+function updateFriendBanner() {
+  const el = $('friend-banner');
+  if (!el) return;
+  if (!activeChat || !currentUser || bannerDismissed(activeChat.id)) { el.classList.add('hidden-element'); return; }
+  const id = activeChat.id;
+  const info = friendInfo(id);
+  if (info.state === 'friends') { el.classList.add('hidden-element'); return; }
+
+  const texts = {
+    none: 'ยังไม่ได้เป็นเพื่อนกัน',
+    sent: 'ส่งคำขอเป็นเพื่อนแล้ว รอการตอบรับ',
+    received: `${nameOf(activeChat)} ส่งคำขอเป็นเพื่อนมาหาคุณ`
+  };
+  el.innerHTML = '';
+  const text = document.createElement('div');
+  text.className = 'fb-text';
+  text.textContent = texts[info.state];
+  el.appendChild(text);
+
+  if (info.state === 'none') el.appendChild(chip('เพิ่มเป็นเพื่อน', () => sendFriendRequest(id), 'primary'));
+  if (info.state === 'sent') el.appendChild(chip('ยกเลิกคำขอ', () => cancelRequest(id)));
+  if (info.state === 'received') {
+    el.appendChild(chip('ยอมรับ', () => respondRequest(id, true), 'primary'));
+    el.appendChild(chip('ปฏิเสธ', () => respondRequest(id, false)));
+  }
+  el.appendChild(chip('ดูโปรไฟล์', () => openUserProfile(id)));
+  el.appendChild(chip(social.muted.has(id) ? 'เปิดเสียง' : 'ปิดเสียง', () => toggleMute(id)));
+  el.appendChild(chip(social.blocked.has(id) ? 'ปลดบล็อก' : 'บล็อก', () => toggleBlock(id), 'danger'));
+  el.appendChild(chip('รายงาน', () => openReport(id), 'danger'));
+  el.appendChild(chip('✕', () => dismissBanner(id), 'close'));
+  el.classList.remove('hidden-element');
+}
+
+// ---------- ดูโปรไฟล์ผู้อื่น (เห็นเฉพาะที่เจ้าของเปิดไว้) ----------
+async function openUserProfile(id) {
+  const { data, error } = await sb.from('public_profiles').select(PROFILE_COLS).eq('id', id).maybeSingle();
+  if (error || !data) return toast('ไม่พบข้อมูลผู้ใช้', 'error');
+  social.profiles[id] = data;
+
+  renderAvatar($('um-avatar'), data.avatar, nameOf(data));
+  $('um-avatar').onclick = () => {
+    if (data.avatar && (data.avatar.startsWith('http') || data.avatar.startsWith('data:'))) {
+      $('viewer-img').src = data.avatar;
+      openModal('image-viewer');
+    }
+  };
+  $('um-name').textContent = nameOf(data);
+
+  const rows = [
+    ['ชื่อเล่น', data.nickname],
+    ['ชื่อผู้ใช้', data.username],
+    ['ID', data.search_id ? '@' + data.search_id : null],
+    ['อีเมล', data.email]
+  ];
+  const box = $('um-rows');
+  box.innerHTML = '';
+  rows.forEach(([label, value]) => {
+    const row = document.createElement('div');
+    row.className = 'um-row';
+    const l = document.createElement('span');
+    l.textContent = label;
+    const v = document.createElement('span');
+    if (value) v.textContent = value; else { v.textContent = 'ผู้ใช้ปิดการแสดง'; v.className = 'off'; }
+    row.append(l, v);
+    box.appendChild(row);
+  });
+
+  const acts = $('um-actions');
+  acts.innerHTML = '';
+  acts.append(
+    actionBtn('ส่งข้อความ', () => openChatWith(id), 'primary-btn'),
+    actionBtn('เพิ่มเติม', () => openPersonSheet(id, 'profile')),
+    actionBtn('ปิด', () => closeModal('user-modal'))
+  );
+  openModal('user-modal');
+}
+
+async function openChatWith(id) {
+  const [p] = await ensureProfiles([id]);
+  if (p) startChatWith(p);
+}
+
+// ---------- เมนูตัวเลือกของคนหนึ่งคน ----------
+function openPersonSheet(id, context) {
+  const info = friendInfo(id);
+  const p = profileOf(id);
+  $('person-title').textContent = nameOf(p);
+  const box = $('person-actions');
+  box.innerHTML = '';
+  const add = (label, fn, cls) => box.appendChild(actionBtn(label, () => { closeModal('person-sheet'); fn(); }, cls || 'secondary-btn'));
+
+  add('ส่งข้อความ', () => openChatWith(id), 'primary-btn');
+  add('ดูโปรไฟล์', () => openUserProfile(id));
+  if (info.state === 'none') add('เพิ่มเป็นเพื่อน', () => sendFriendRequest(id));
+  if (info.state === 'sent') add('ยกเลิกคำขอเป็นเพื่อน', () => cancelRequest(id));
+  if (info.state === 'received') {
+    add('ยอมรับคำขอเป็นเพื่อน', () => respondRequest(id, true));
+    add('ปฏิเสธคำขอ', () => respondRequest(id, false));
+  }
+  add(social.muted.has(id) ? 'เปิดเสียงแจ้งเตือน' : 'ปิดเสียงแจ้งเตือน', () => toggleMute(id));
+  add(social.blocked.has(id) ? 'ปลดบล็อก' : 'บล็อก', () => toggleBlock(id), 'secondary-btn danger');
+  add('รายงาน', () => openReport(id), 'secondary-btn danger');
+  // ลบเพื่อนได้เฉพาะจากหน้า "เพื่อนทั้งหมด"
+  if (info.state === 'friends' && context === 'friends') add('ลบเพื่อน', () => removeFriendConfirm(id), 'secondary-btn danger');
+  box.appendChild(actionBtn('ปิด', () => closeModal('person-sheet')));
+  openModal('person-sheet');
+}
+
+// ---------- หน้าต่าง: เพื่อนทั้งหมด / คำขอ / รายชื่อบล็อก ----------
+function openFriendsModal() { openModal('friends-modal'); renderFriends(); }
+function openRequestsModal() { openModal('requests-modal'); renderRequests(); }
+function openBlockedModal() { closeModal('settings-modal'); openModal('blocked-modal'); renderBlocked(); }
+
+async function renderFriends() {
+  const token = ++friendsToken;
+  const box = $('friends-list');
+  const ids = friendIds();
+  $('friends-count').textContent = ids.length ? `(${ids.length})` : '';
+  if (!ids.length) { box.innerHTML = ''; box.appendChild(hintNode('ยังไม่มีเพื่อน กด "+ เพิ่มเพื่อน" เพื่อค้นหา')); return; }
+
+  const profiles = (await ensureProfiles(ids)).sort((a, b) => nameOf(a).localeCompare(nameOf(b)));
+  if (token !== friendsToken) return;
+  box.innerHTML = '';
+  profiles.forEach(p => {
+    const row = personRow(p, isOnline(p.id) ? 'ออนไลน์อยู่' : (p.search_id ? '@' + p.search_id : ''));
+    row.classList.add('tap');
+    row.onclick = () => openChatWith(p.id);
+    const more = document.createElement('button');
+    more.type = 'button';
+    more.className = 'mini-btn ghost';
+    more.textContent = '⋯';
+    more.setAttribute('aria-label', 'ตัวเลือก');
+    more.onclick = e => { e.stopPropagation(); openPersonSheet(p.id, 'friends'); };
+    row.appendChild(more);
+    box.appendChild(row);
+  });
+}
+
+async function renderRequests() {
+  const box = $('requests-body');
+  const incoming = pendingIncoming();
+  const outgoing = pendingOutgoing();
+  if (!incoming.length && !outgoing.length) { box.innerHTML = ''; box.appendChild(hintNode('ไม่มีคำขอเป็นเพื่อน')); return; }
+
+  const profs = await ensureProfiles([...incoming.map(f => f.requester_id), ...outgoing.map(f => f.addressee_id)]);
+  const byId = Object.fromEntries(profs.map(p => [p.id, p]));
+  box.innerHTML = '';
+
+  const title = text => { const t = document.createElement('div'); t.className = 'list-title'; t.textContent = text; box.appendChild(t); };
+
+  if (incoming.length) {
+    title(`คำขอที่ได้รับ (${incoming.length})`);
+    incoming.forEach(f => {
+      const id = f.requester_id;
+      const card = document.createElement('div');
+      card.className = 'req-card';
+      card.appendChild(personRow(byId[id] || { id }, byId[id] && byId[id].search_id ? '@' + byId[id].search_id : ''));
+      const acts = document.createElement('div');
+      acts.className = 'req-actions';
+      acts.append(
+        chip('ยอมรับ', () => respondRequest(id, true), 'primary'),
+        chip('ปฏิเสธ', () => respondRequest(id, false)),
+        chip('ดูโปรไฟล์', () => openUserProfile(id)),
+        chip('บล็อก', () => toggleBlock(id), 'danger'),
+        chip('รายงาน', () => openReport(id), 'danger')
+      );
+      card.appendChild(acts);
+      box.appendChild(card);
+    });
+  }
+
+  if (outgoing.length) {
+    title(`คำขอที่ส่งไป (${outgoing.length})`);
+    outgoing.forEach(f => {
+      const id = f.addressee_id;
+      const row = personRow(byId[id] || { id }, 'รอการตอบรับ');
+      row.appendChild(chip('ยกเลิกคำขอ', () => cancelRequest(id)));
+      box.appendChild(row);
+    });
+  }
+}
+
+async function renderBlocked() {
+  const box = $('blocked-list');
+  const ids = [...social.blocked];
+  if (!ids.length) { box.innerHTML = ''; box.appendChild(hintNode('ยังไม่มีรายชื่อที่ถูกบล็อก')); return; }
+  const profs = await ensureProfiles(ids);
+  box.innerHTML = '';
+  profs.forEach(p => {
+    const row = personRow(p, p.search_id ? '@' + p.search_id : '');
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'mini-btn ghost';
+    b.textContent = 'ปลดบล็อก';
+    b.onclick = () => toggleBlock(p.id);
+    row.appendChild(b);
+    box.appendChild(row);
+  });
+}
+
+function updateRequestBadge() {
+  const b = $('req-badge');
+  if (!b) return;
+  const n = currentUser ? pendingIncoming().length : 0;
+  b.textContent = n > 99 ? '99+' : n;
+  b.classList.toggle('hidden-element', n === 0);
+}
+
+function renderSocialUI() {
+  updateRequestBadge();
+  updateFriendBanner();
+  if (!$('friends-modal').classList.contains('hidden-element')) renderFriends();
+  if (!$('requests-modal').classList.contains('hidden-element')) renderRequests();
+  if (!$('blocked-modal').classList.contains('hidden-element')) renderBlocked();
+}
+
+// คำขอเป็นเพื่อนเปลี่ยนแปลงแบบเรียลไทม์
+async function onFriendshipChange(payload) {
+  if (!currentUser) return;
+  await refreshFriendships();
+  renderSocialUI();
+  const row = payload.new;
+  if (!row || !row.id) return;
+  try {
+    if (payload.eventType === 'INSERT' && row.addressee_id === currentUser.id && row.status === 'pending') {
+      const [p] = await ensureProfiles([row.requester_id]);
+      toast(`${nameOf(p)} ส่งคำขอเป็นเพื่อนถึงคุณ`, 'alert');
+      playSound('receive');
+    } else if (payload.eventType === 'UPDATE' && row.requester_id === currentUser.id && row.status === 'accepted') {
+      const [p] = await ensureProfiles([row.addressee_id]);
+      toast(`${nameOf(p)} ยอมรับคำขอเป็นเพื่อนแล้ว`, 'success');
+    }
+  } catch (e) { /* ไม่เป็นไร */ }
+}
+
+// ---------- ลบข้อความทั้งแชท (ฝั่งตัวเอง) ด้วยการปัดซ้าย ----------
+async function clearChat(id) {
+  const p = profileOf(id);
+  const ok = await confirmDialog(
+    'ลบข้อความทั้งหมด',
+    `ลบข้อความทั้งหมดในแชทกับ ${nameOf(p)}?\nลบเฉพาะฝั่งคุณ เพื่อนยังเห็นข้อความเดิม\nและยังอยู่ในรายชื่อเพื่อนของคุณ`,
+    'ลบข้อความ', true);
+  if (!ok) return;
+
+  const last = lastMessageOf(id);
+  const ts = Math.max(Date.now(), last ? last.ts + 1 : 0);
+  const { error } = await sb.from('chat_clears').upsert(
+    { user_id: currentUser.id, partner_id: id, cleared_at: new Date(ts).toISOString() },
+    { onConflict: 'user_id,partner_id' });
+  if (error) return handleDbError(error);
+
+  social.cleared[id] = ts;
+  if (p) social.profiles[id] = p;
+  state.messages[id] = [];
+  delete state.contacts[id];
+  saveContacts();
+  delete lastRead[id];
+  saveLastRead();
+  if (activeChat && activeChat.id === id) { activeChat = null; resetChatView(); backToList(); }
+  loadChatList();
+  toast('ลบข้อความเรียบร้อย', 'success');
+}
+
+function closeSwipe() {
+  if (openSwipe) { openSwipe.style.transform = ''; openSwipe.classList.remove('swiped'); openSwipe = null; }
+}
+
+// ปัดรายการแชทไปทางซ้ายเพื่อเผยปุ่ม "ลบ" (รองรับทั้งนิ้วและเมาส์)
+function attachSwipe(item, delBtn, onTap, onDelete) {
+  let startX = 0, startY = 0, dx = 0, dragging = false, moved = false;
+
+  item.addEventListener('pointerdown', e => {
+    if (e.button) return;
+    startX = e.clientX; startY = e.clientY; dx = 0; dragging = true; moved = false;
+    if (openSwipe && openSwipe !== item) closeSwipe();
+  });
+  item.addEventListener('pointermove', e => {
+    if (!dragging) return;
+    const x = e.clientX - startX, y = e.clientY - startY;
+    if (!moved && Math.abs(x) > 8 && Math.abs(x) > Math.abs(y)) {
+      moved = true;
+      item.setPointerCapture(e.pointerId);
+      item.style.transition = 'none';
+    }
+    if (moved) {
+      const base = item === openSwipe ? -88 : 0;
+      dx = Math.max(-110, Math.min(0, base + x));
+      item.style.transform = `translateX(${dx}px)`;
+    }
+  });
+  const end = () => {
+    if (!dragging) return;
+    dragging = false;
+    item.style.transition = '';
+    if (!moved) return;
+    if (dx < -44) { item.style.transform = 'translateX(-88px)'; item.classList.add('swiped'); openSwipe = item; }
+    else { item.style.transform = ''; item.classList.remove('swiped'); if (openSwipe === item) openSwipe = null; }
+  };
+  item.addEventListener('pointerup', end);
+  item.addEventListener('pointercancel', end);
+  item.addEventListener('click', e => {
+    if (moved) { moved = false; e.preventDefault(); return; }
+    if (openSwipe === item) { closeSwipe(); return; }
+    onTap();
+  });
+  delBtn.onclick = () => { closeSwipe(); onDelete(); };
 }
 
 // ==================== Service Worker ====================
