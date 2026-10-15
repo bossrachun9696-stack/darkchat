@@ -113,6 +113,11 @@
           </div>
         </div>
 
+        <div class="quick-actions">
+          <button type="button" class="quick-btn" onclick="openFriendsModal()">เพื่อนทั้งหมด</button>
+          <button type="button" class="quick-btn" onclick="openRequestsModal()">คำขอเป็นเพื่อน<span id="req-badge" class="req-badge hidden-element">0</span></button>
+        </div>
+
         <div class="search-box">
           <input type="search" id="search-input" placeholder="ค้นหาในรายการแชท" oninput="filterChats()">
         </div>
@@ -134,6 +139,8 @@
             </div>
           </div>
         </div>
+
+        <div id="friend-banner" class="friend-banner hidden-element"></div>
 
         <div class="messages-container" id="messages-container"></div>
 
@@ -316,6 +323,7 @@
       <div class="stack">
         <button type="button" class="secondary-btn" onclick="openPasswordModal()">เปลี่ยนรหัสผ่าน</button>
         <button type="button" class="secondary-btn" onclick="startChangePin()">เปลี่ยน PIN</button>
+        <button type="button" class="secondary-btn" onclick="openBlockedModal()">รายชื่อที่ถูกบล็อก</button>
       </div>
 
       <div class="modal-actions">
@@ -352,6 +360,85 @@
       <div class="modal-actions">
         <button class="secondary-btn" onclick="closeModal('pw-modal')">ยกเลิก</button>
         <button class="primary-btn" id="pw-submit-btn" onclick="submitPasswordChange()">เปลี่ยนรหัสผ่าน</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- เพื่อนทั้งหมด -->
+  <div id="friends-modal" class="modal hidden-element" onclick="if(event.target===this)closeModal('friends-modal')">
+    <div class="modal-content">
+      <h3>เพื่อนทั้งหมด <span id="friends-count" class="hint inline"></span></h3>
+      <div id="friends-list" class="user-results tall"></div>
+      <div class="modal-actions">
+        <button class="secondary-btn" onclick="closeModal('friends-modal');toggleSearchModal(true)">+ เพิ่มเพื่อน</button>
+        <button class="secondary-btn" onclick="closeModal('friends-modal')">ปิด</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- คำขอเป็นเพื่อน -->
+  <div id="requests-modal" class="modal hidden-element" onclick="if(event.target===this)closeModal('requests-modal')">
+    <div class="modal-content">
+      <h3>คำขอเป็นเพื่อน</h3>
+      <div id="requests-body" class="user-results tall"></div>
+      <div class="modal-actions">
+        <button class="secondary-btn" onclick="closeModal('requests-modal')">ปิด</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- รายชื่อที่ถูกบล็อก -->
+  <div id="blocked-modal" class="modal hidden-element" onclick="if(event.target===this)closeModal('blocked-modal')">
+    <div class="modal-content">
+      <h3>รายชื่อที่ถูกบล็อก</h3>
+      <div id="blocked-list" class="user-results tall"></div>
+      <div class="modal-actions">
+        <button class="secondary-btn" onclick="closeModal('blocked-modal')">ปิด</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- โปรไฟล์ผู้อื่น -->
+  <div id="user-modal" class="modal hidden-element" onclick="if(event.target===this)closeModal('user-modal')">
+    <div class="modal-content">
+      <div class="pf-head">
+        <button type="button" class="avatar avatar-xl" id="um-avatar" aria-label="รูปโปรไฟล์">D</button>
+        <h3 id="um-name" style="margin:8px 0 0"></h3>
+      </div>
+      <div id="um-rows"></div>
+      <div class="stack" id="um-actions"></div>
+    </div>
+  </div>
+
+  <!-- ตัวเลือกของบุคคล -->
+  <div id="person-sheet" class="modal hidden-element" onclick="if(event.target===this)closeModal('person-sheet')">
+    <div class="modal-content confirm-box">
+      <h3 id="person-title"></h3>
+      <div class="stack" id="person-actions"></div>
+    </div>
+  </div>
+
+  <!-- รายงานผู้ใช้ -->
+  <div id="report-modal" class="modal hidden-element" onclick="if(event.target===this)closeModal('report-modal')">
+    <div class="modal-content">
+      <h3>รายงานผู้ใช้</h3>
+      <div class="input-group">
+        <label for="report-reason">เหตุผล</label>
+        <select id="report-reason">
+          <option>สแปมหรือโฆษณา</option>
+          <option>คุกคามหรือรังแก</option>
+          <option>แอบอ้างเป็นผู้อื่น</option>
+          <option>เนื้อหาไม่เหมาะสม</option>
+          <option>อื่นๆ</option>
+        </select>
+      </div>
+      <div class="input-group">
+        <label for="report-details">รายละเอียดเพิ่มเติม (ไม่บังคับ)</label>
+        <textarea id="report-details" rows="3" maxlength="300"></textarea>
+      </div>
+      <div class="modal-actions">
+        <button class="secondary-btn" onclick="closeModal('report-modal')">ยกเลิก</button>
+        <button class="primary-btn" id="report-submit-btn" onclick="submitReport()">ส่งรายงาน</button>
       </div>
     </div>
   </div>
