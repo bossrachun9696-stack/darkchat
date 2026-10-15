@@ -569,3 +569,75 @@ body[data-mode="light"] ::-webkit-scrollbar-thumb { background: rgba(20, 20, 40,
 @media (max-width: 760px) {
   .add-friend-btn { padding: 8px 10px; }
 }
+
+
+/* ================= เฟส B1: เพื่อน / คำขอ / ปัดลบ ================= */
+.quick-actions { display: flex; gap: 8px; padding: 10px 16px 0; }
+.quick-btn {
+  flex: 1; padding: 9px 8px; border-radius: 12px;
+  border: 1px solid var(--border-color); background: var(--bg-hover);
+  color: var(--text-main); font-size: 0.82rem; font-weight: 500; cursor: pointer; transition: 0.2s;
+}
+.quick-btn:hover { background: var(--bg-hover-2); }
+.req-badge {
+  display: inline-grid; place-items: center; margin-left: 6px;
+  min-width: 18px; height: 18px; padding: 0 5px; border-radius: 9px;
+  background: #ef4444; color: #fff; font-size: 0.68rem; font-weight: 600;
+}
+
+.friend-banner {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 8px;
+  padding: 10px 16px; font-size: 0.85rem;
+  background: color-mix(in srgb, var(--accent-color) 10%, var(--bg-solid));
+  border-bottom: 1px solid var(--border-color);
+}
+.fb-text { flex: 1 1 100%; color: var(--text-muted); }
+.chip {
+  padding: 6px 12px; border-radius: 999px; cursor: pointer;
+  border: 1px solid var(--border-color); background: var(--bg-solid);
+  color: var(--text-main); font-size: 0.78rem; transition: 0.15s;
+}
+.chip:hover { filter: brightness(1.08); }
+.chip.primary { background: var(--grad); color: #fff; border-color: transparent; }
+.chip.danger { color: #ef4444; }
+.chip.close { margin-left: auto; color: var(--text-muted); }
+
+.mini-btn.ghost { background: var(--bg-hover); color: var(--text-main); border: 1px solid var(--border-color); }
+.mini-btn:disabled { opacity: 0.6; cursor: default; filter: none; }
+.user-row.tap { cursor: pointer; }
+.user-results.tall { max-height: 52vh; }
+.hint.inline { display: inline; margin: 0 0 0 6px; }
+.list-title { margin: 14px 0 6px; font-size: 0.8rem; font-weight: 500; color: var(--text-muted); }
+.list-title:first-child { margin-top: 0; }
+.req-card { padding: 8px 10px 10px; margin-bottom: 8px; border: 1px solid var(--border-color); border-radius: 14px; }
+.req-card .user-row { padding: 4px 0; }
+.req-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+
+.um-row { display: flex; justify-content: space-between; gap: 12px; padding: 10px 0; border-bottom: 1px solid var(--border-color); font-size: 0.9rem; }
+.um-row span:first-child { color: var(--text-muted); flex-shrink: 0; }
+.um-row span:last-child { text-align: right; word-break: break-all; }
+.um-row .off { color: var(--text-muted); font-style: italic; font-size: 0.82rem; }
+
+.secondary-btn.danger { color: #ef4444; }
+.input-group textarea {
+  width: 100%; padding: 12px 14px; resize: vertical;
+  background: var(--input-bg); border: 1px solid var(--border-color); border-radius: 12px;
+  color: var(--text-main); outline: none; font-family: inherit; transition: 0.2s;
+}
+.input-group textarea:focus { border-color: var(--accent-color); box-shadow: 0 0 0 3px var(--glow); }
+
+/* ปัดซ้ายเพื่อลบข้อความทั้งแชท */
+.chat-item-wrap { position: relative; overflow: hidden; border-radius: 14px; margin-bottom: 2px; }
+.chat-item-wrap .chat-item {
+  position: relative; z-index: 1; margin-bottom: 0;
+  background: var(--bg-sidebar); transition: transform 0.2s;
+  touch-action: pan-y; user-select: none; -webkit-user-select: none;
+}
+.chat-item-wrap .chat-item:hover { background: linear-gradient(var(--bg-hover), var(--bg-hover)), var(--bg-sidebar); }
+.chat-item-wrap .chat-item.active {
+  background: linear-gradient(color-mix(in srgb, var(--accent-color) 16%, transparent), color-mix(in srgb, var(--accent-color) 16%, transparent)), var(--bg-sidebar);
+}
+.swipe-del {
+  position: absolute; right: 0; top: 0; bottom: 0; width: 88px;
+  border: none; background: #ef4444; color: #fff; font-weight: 600; font-size: 0.9rem; cursor: pointer;
+}
