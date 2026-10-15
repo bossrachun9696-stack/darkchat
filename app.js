@@ -1030,7 +1030,11 @@ function selectChat(chat) {
 }
 
 function backToList() {
+  // กลับหน้ารายการแชท = ออกจากห้องนั้นจริงๆ (ไม่งั้นแอปคิดว่ายังเปิดห้องอยู่ แล้วนับข้อความใหม่เป็น "อ่านแล้ว")
   $('main-section').classList.remove('chat-open');
+  activeChat = null;
+  resetChatView();
+  loadChatList();
 }
 
 function loadMessages() {
