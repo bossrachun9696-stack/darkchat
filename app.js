@@ -15,7 +15,7 @@ try {
 // ==================== State ====================
 let currentUser = null;
 let activeChat = null;
-let state = { contacts: {}, messages: {} };
+let state = { contacts: {}, messages: {}, groups: {} };
 let onlineIds = new Set();
 let msgChannel = null;
 let presenceChannel = null;
@@ -56,6 +56,8 @@ function thaiError(error) {
   if (/rate limit/i.test(msg)) return 'ทำรายการบ่อยเกินไป กรุณารอสักครู่';
   if (/should be different|same as the old/i.test(msg)) return 'รหัสผ่านใหม่ต้องไม่ซ้ำกับรหัสเดิม';
   if (/too_many_new_chats/i.test(msg)) return 'เริ่มแชทกับคนใหม่ได้ไม่เกิน 20 คนต่อวัน';
+  if (/group_full/i.test(msg)) return 'กลุ่มนี้เต็มแล้ว';
+  if (/not_public/i.test(msg)) return 'กลุ่มนี้ไม่ได้เปิดเป็นกลุ่มสาธารณะ';
   if (/too_many_requests/i.test(msg)) return 'ส่งคำขอเป็นเพื่อนได้ไม่เกิน 20 ครั้งต่อวัน';
   if (/row-level security/i.test(msg)) return 'ทำรายการไม่ได้ (ถ้ากำลังส่งข้อความ ผู้ใช้นี้อาจบล็อกคุณ)';
   return msg || 'เกิดข้อผิดพลาดที่ไม่ทราบสาเหตุ';
@@ -65,7 +67,7 @@ function thaiError(error) {
 function handleDbError(error) {
   const msg = (error && error.message) || '';
   if ((error && (error.code === '42P01' || error.code === '42703')) || /does not exist|schema cache|Could not find the (table|function)/i.test(msg)) {
-    toast('ฐานข้อมูลยังตั้งค่าไม่ครบ กรุณารันไฟล์ supabase.sql, supabase-push.sql, supabase-phase-a.sql และ supabase-phase-b.sql ใน SQL Editor ของ Supabase', 'error');
+    toast('ฐานข้อมูลยังตั้งค่าไม่ครบ กรุณารันไฟล์ supabase.sql, supabase-push.sql, supabase-phase-a.sql, supabase-phase-b.sql, supabase-phase-b2.sql และ supabase-phase-b3.sql ใน SQL Editor ของ Supabase', 'error');
   } else {
     toast(thaiError(error), 'error');
   }
@@ -118,7 +120,7 @@ async function enterApp(user) {
       searchId: null,
       showName: true, showAvatar: true, showEmail: false, showId: true, showOnline: true
     };
-    state = { contacts: {}, messages: {} };
+    state = { contacts: {}, messages: {}, groups: {} };
     social = emptySocial();
     onlineIds = new Set();
     lastRead = {};
@@ -133,6 +135,7 @@ async function enterApp(user) {
     await loadMyProfile();
     updateUserProfileUI();
     await loadSocial();
+    await loadGroups();
     await loadInitialData();
     subscribeRealtime();
     loadChatList();
@@ -164,7 +167,7 @@ function leaveApp() {
   document.querySelectorAll('.modal').forEach(m => m.classList.add('hidden-element'));
   currentUser = null;
   activeChat = null;
-  state = { contacts: {}, messages: {} };
+  state = { contacts: {}, messages: {}, groups: {} };
   social = emptySocial();
   lastRead = {};
   updateBadges();
@@ -293,7 +296,10 @@ const PRIVACY = {
 };
 
 // ชื่อที่แสดงของคนอื่น: ถ้าเขาปิดชื่อผู้ใช้ จะใช้ชื่อเล่นแทน
-function nameOf(p) { return (p && (p.username || p.nickname)) || 'ผู้ใช้'; }
+function nameOf(p) {
+  if (p && p.isGroup) return p.name;
+  return (p && (p.username || p.nickname)) || 'ผู้ใช้';
+}
 
 function applyMyProfile(d) {
   currentUser.username = d.username;
@@ -494,6 +500,8 @@ function toLocal(row) {
     text: row.text,
     ts,
     isMe: row.sender_id === currentUser.id,
+    senderId: row.sender_id,
+    kind: row.kind || 'text',
     expiresAt: exp,
     timer: exp ? Math.round((exp - ts) / 1000) : null
   };
@@ -522,20 +530,27 @@ async function loadInitialData() {
 
   const { data: rows, error } = await sb.from('messages')
     .select('*')
-    .or(`sender_id.eq.${me},receiver_id.eq.${me}`)
     .order('created_at', { ascending: false })
     .limit(500);
   if (error) { handleDbError(error); return; }
 
   const now = Date.now();
   const ids = new Set();
+  const senderIds = new Set();
   try { JSON.parse(localStorage.getItem(contactsKey()) || '[]').forEach(id => ids.add(id)); } catch (e) { /* ignore */ }
 
   rows.forEach(row => {
-    const partner = row.sender_id === me ? row.receiver_id : row.sender_id;
+    const isGroupMsg = !!row.group_id;
+    const partner = isGroupMsg ? row.group_id : (row.sender_id === me ? row.receiver_id : row.sender_id);
     const msg = toLocal(row);
     if (msg.expiresAt && msg.expiresAt <= now) return;
     if (social.cleared[partner] && msg.ts <= social.cleared[partner]) return;
+    if (isGroupMsg) {
+      if (!state.groups[partner]) return;
+      if (row.sender_id !== me && !state.groups[partner].anonymous) senderIds.add(row.sender_id);
+      addLocal(partner, msg);
+      return;
+    }
     ids.add(partner);
     addLocal(partner, msg);
   });
@@ -546,6 +561,7 @@ async function loadInitialData() {
     if (pErr) { handleDbError(pErr); return; }
     profiles.forEach(p => { state.contacts[p.id] = p; });
   }
+  if (senderIds.size) await ensureProfiles([...senderIds]);
   saveContacts();
   initLastRead();
 }
@@ -561,6 +577,8 @@ function subscribeRealtime() {
     .on('postgres_changes', { event: 'DELETE', schema: 'public', table: 'messages' },
       payload => onRemoteDelete(payload.old && payload.old.id))
     .on('postgres_changes', { event: '*', schema: 'public', table: 'friendships' }, onFriendshipChange)
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'group_members' }, onGroupChange)
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'groups' }, onGroupChange)
     .subscribe();
 
   presenceChannel = sb.channel('darkchat-online', {
@@ -593,9 +611,15 @@ function unsubscribeRealtime() {
 async function onIncoming(row) {
   if (!currentUser || !row) return;
   const me = currentUser.id;
-  const partner = row.sender_id === me ? row.receiver_id : row.sender_id;
+  const partner = row.group_id || (row.sender_id === me ? row.receiver_id : row.sender_id);
 
-  if (!state.contacts[partner]) {
+  if (row.group_id) {
+    if (!state.groups[partner]) {
+      try { await loadGroups(); } catch (e) { return; }
+      if (!state.groups[partner]) return;
+    }
+    if (row.sender_id !== me && !state.groups[partner].anonymous) await ensureProfiles([row.sender_id]);
+  } else if (!state.contacts[partner]) {
     await fetchContact(partner);
     if (!state.contacts[partner]) return;
   }
@@ -603,12 +627,13 @@ async function onIncoming(row) {
   const msg = toLocal(row);
   if (!addLocal(partner, msg)) return; // ซ้ำกับที่เพิ่มตอนส่งเอง
 
-  if (!msg.isMe) {
-    if (!social.muted.has(partner)) playSound('receive');
+  if (!msg.isMe && msg.kind !== 'system') {
+    if (!isMuted(partner)) playSound('receive');
     const viewing = activeChat && activeChat.id === partner && !document.hidden;
     if (activeChat && activeChat.id === partner) hideTyping();
-    if (!viewing && !social.muted.has(partner)) {
-      const who = nameOf(state.contacts[partner]);
+    if (!viewing && !isMuted(partner)) {
+      const chatName = nameOf(state.contacts[partner] || state.groups[partner]);
+      const who = row.group_id ? `${chatName} (${groupSenderName(state.groups[partner], row.sender_id)})` : chatName;
       toast(`ข้อความใหม่จาก ${who}: ${msg.text.slice(0, 40)}`, 'alert');
     }
   }
@@ -678,7 +703,7 @@ function initLastRead() {
 
 function unreadOf(chatId) {
   const since = lastRead[chatId] || 0;
-  return (state.messages[chatId] || []).filter(m => !m.isMe && m.ts > since).length;
+  return (state.messages[chatId] || []).filter(m => !m.isMe && m.kind !== 'system' && m.ts > since).length;
 }
 
 function markRead(chatId) {
@@ -693,7 +718,7 @@ function markRead(chatId) {
 function updateBadges() {
   let total = 0, others = 0;
   if (currentUser) {
-    Object.keys(state.contacts).forEach(id => {
+    [...Object.keys(state.contacts), ...Object.keys(state.groups || {})].forEach(id => {
       const n = unreadOf(id);
       total += n;
       if (!activeChat || activeChat.id !== id) others += n;
@@ -810,6 +835,7 @@ async function toggleNotifications(want) {
 
 async function openChatById(id) {
   if (!id || !currentUser) return;
+  if (state.groups[id]) { selectChat(state.groups[id]); return; }
   if (!state.contacts[id]) await fetchContact(id);
   if (state.contacts[id]) selectChat(state.contacts[id]);
 }
@@ -826,7 +852,7 @@ function loadChatList(filtered = null) {
   openSwipe = null;
   updateBadges();
 
-  const chats = (filtered || Object.values(state.contacts)).slice().sort((a, b) => {
+  const chats = (filtered || allChats()).slice().sort((a, b) => {
     const ta = lastMessageOf(a.id)?.ts || 0, tb = lastMessageOf(b.id)?.ts || 0;
     return (tb - ta) || nameOf(a).localeCompare(nameOf(b));
   });
@@ -844,10 +870,10 @@ function loadChatList(filtered = null) {
     const unread = unreadOf(chat.id);
 
     const item = document.createElement('div');
-    item.className = 'chat-item' + (activeChat?.id === chat.id ? ' active' : '');
+    item.className = 'chat-item' + (chat.isGroup ? ' group' : '') + (activeChat?.id === chat.id ? ' active' : '');
 
     const avatar = document.createElement('div');
-    avatar.className = 'avatar';
+    avatar.className = 'avatar' + (chat.isGroup ? ' group-av' : '');
     renderAvatar(avatar, chat.avatar, nameOf(chat));
 
     const info = document.createElement('div');
@@ -858,6 +884,18 @@ function loadChatList(filtered = null) {
     const name = document.createElement('span');
     name.className = 'chat-name';
     name.textContent = nameOf(chat);
+    if (chat.isGroup) {
+      const tag = document.createElement('span');
+      tag.className = 'tag-group';
+      tag.textContent = 'กลุ่ม';
+      name.appendChild(tag);
+      if (chat.anonymous) {
+        const anon = document.createElement('span');
+        anon.className = 'tag-group tag-anon';
+        anon.textContent = 'ไม่แสดงตัวตน';
+        name.appendChild(anon);
+      }
+    }
     if (isOnline(chat.id)) {
       const dot = document.createElement('span');
       dot.className = 'status-dot online';
@@ -872,7 +910,7 @@ function loadChatList(filtered = null) {
     bottom.className = 'chat-bottom';
     const preview = document.createElement('div');
     preview.className = 'chat-preview';
-    preview.textContent = last ? (last.isMe ? 'คุณ: ' : '') + last.text : 'เริ่มต้นการสนทนา';
+    preview.textContent = previewText(chat, last);
     bottom.appendChild(preview);
     if (unread > 0) {
       const badge = document.createElement('span');
@@ -899,7 +937,7 @@ function loadChatList(filtered = null) {
 function filterChats() {
   const q = $('search-input').value.toLowerCase().trim();
   if (!q) return loadChatList();
-  loadChatList(Object.values(state.contacts).filter(chat =>
+  loadChatList(allChats().filter(chat =>
     nameOf(chat).toLowerCase().includes(q) ||
     (lastMessageOf(chat.id)?.text || '').toLowerCase().includes(q)
   ));
@@ -910,7 +948,7 @@ function toggleSearchModal(show) {
   $('search-modal').classList.toggle('hidden-element', !show);
   if (show) {
     $('user-search-input').value = '';
-    setUserHint('พิมพ์ชื่อผู้ใช้ของเพื่อนเพื่อค้นหา');
+    setSearchTab('users');
     setTimeout(() => $('user-search-input').focus(), 50);
   }
 }
@@ -931,6 +969,7 @@ function searchUsers() {
 
 async function runUserSearch() {
   if (!currentUser) return;
+  if (searchTab === 'groups') return runGroupSearch();
   const q = $('user-search-input').value.trim().replace(/[%_\\,()]/g, '');
   if (q.length < 2) return setUserHint('พิมพ์อย่างน้อย 2 ตัวอักษร');
 
@@ -971,7 +1010,7 @@ async function runUserSearch() {
 }
 
 function startChatWith(profile) {
-  ['friends-modal', 'requests-modal', 'user-modal', 'person-sheet', 'blocked-modal'].forEach(closeModal);
+  ['friends-modal', 'requests-modal', 'user-modal', 'person-sheet', 'blocked-modal', 'ginfo-modal', 'group-modal'].forEach(closeModal);
   state.contacts[profile.id] = profile;
   saveContacts();
   toggleSearchModal(false);
@@ -983,6 +1022,7 @@ function startChatWith(profile) {
 // ==================== หน้าแชท ====================
 function resetChatView() {
   $('friend-banner').classList.add('hidden-element');
+  $('chat-area').classList.remove('group-mode');
   $('active-chat-title').textContent = 'ยินดีต้อนรับสู่ DarkChat';
   $('active-chat-subtitle').textContent = 'เลือกแชทเพื่อเริ่มสนทนา';
   renderAvatar($('active-chat-avatar'), '💬', 'D');
@@ -1001,6 +1041,10 @@ function isOnline(id) {
 
 function updateHeaderStatus() {
   if (!activeChat) return;
+  if (activeChat.isGroup) {
+    $('active-chat-subtitle').textContent = `สมาชิก ${activeChat.members.length} คน`;
+    return;
+  }
   if (!currentUser || !currentUser.showOnline) {
     $('active-chat-subtitle').textContent = '';
     return;
@@ -1009,13 +1053,14 @@ function updateHeaderStatus() {
 }
 
 function selectChat(chat) {
-  activeChat = state.contacts[chat.id] || chat;
+  activeChat = state.contacts[chat.id] || state.groups[chat.id] || chat;
   markRead(activeChat.id);
   hideTyping();
 
   $('active-chat-title').textContent = nameOf(activeChat);
   updateHeaderStatus();
   renderAvatar($('active-chat-avatar'), activeChat.avatar, nameOf(activeChat));
+  $('chat-area').classList.toggle('group-mode', !!activeChat.isGroup);
 
   $('message-input').disabled = false;
   $('send-btn').disabled = false;
@@ -1050,6 +1095,13 @@ function loadMessages() {
   }
 
   list.forEach(msg => {
+    if (msg.kind === 'system') {
+      const sys = document.createElement('div');
+      sys.className = 'system-msg';
+      sys.textContent = msg.text;
+      container.appendChild(sys);
+      return;
+    }
     const bubble = document.createElement('div');
     bubble.className = 'message-bubble ' + (msg.isMe ? 'sent' : 'received');
 
@@ -1061,6 +1113,12 @@ function loadMessages() {
       del.textContent = '🗑️';
       del.onclick = () => deleteMessage(msg.id);
       bubble.appendChild(del);
+    } else if (activeChat.isGroup) {
+      const who = document.createElement('span');
+      who.className = 'msg-sender';
+      who.textContent = groupSenderName(activeChat, msg.senderId);
+      who.style.color = `hsl(${hueOf(msg.senderId)} 65% 55%)`;
+      bubble.appendChild(who);
     }
 
     const text = document.createElement('span');
@@ -1100,7 +1158,7 @@ async function sendMessage(e) {
 
   const { data, error } = await sb.from('messages').insert({
     sender_id: currentUser.id,
-    receiver_id: chat.id,
+    ...(chat.isGroup ? { group_id: chat.id } : { receiver_id: chat.id }),
     text,
     expires_at: seconds ? new Date(Date.now() + seconds * 1000).toISOString() : null
   }).select().single();
@@ -1128,7 +1186,7 @@ async function deleteMessage(msgId) {
 
 // ==================== กำลังพิมพ์ ====================
 function handleTyping() {
-  if (!activeChat || !presenceChannel || !currentUser) return;
+  if (!activeChat || activeChat.isGroup || !presenceChannel || !currentUser) return;
   const now = Date.now();
   if (now - lastTypingSent < 1500) return;
   lastTypingSent = now;
@@ -1591,7 +1649,7 @@ async function toggleBlock(id) {
 // ถ้าเราบล็อกอีกฝั่งอยู่ จะพิมพ์ส่งข้อความไม่ได้
 function updateComposerState() {
   if (!activeChat) return;
-  const blocked = social.blocked.has(activeChat.id);
+  const blocked = !activeChat.isGroup && social.blocked.has(activeChat.id);
   $('message-input').disabled = blocked;
   $('send-btn').disabled = blocked;
   $('message-input').placeholder = blocked
@@ -1695,7 +1753,7 @@ function dismissBanner(id) {
 function updateFriendBanner() {
   const el = $('friend-banner');
   if (!el) return;
-  if (!activeChat || !currentUser || bannerDismissed(activeChat.id)) { el.classList.add('hidden-element'); return; }
+  if (!activeChat || activeChat.isGroup || !currentUser || bannerDismissed(activeChat.id)) { el.classList.add('hidden-element'); return; }
   const id = activeChat.id;
   const info = friendInfo(id);
   if (info.state === 'friends') { el.classList.add('hidden-element'); return; }
@@ -1727,8 +1785,9 @@ function updateFriendBanner() {
 
 // ---------- ดูโปรไฟล์ผู้อื่น (เห็นเฉพาะที่เจ้าของเปิดไว้) ----------
 async function openUserProfile(id) {
-  const { data, error } = await sb.from('public_profiles').select(PROFILE_COLS).eq('id', id).maybeSingle();
-  if (error || !data) return toast('ไม่พบข้อมูลผู้ใช้', 'error');
+  const { data: fetched } = await sb.from('public_profiles').select(PROFILE_COLS).eq('id', id).maybeSingle();
+  const data = fetched || profileOf(id);
+  if (!data) return toast('ไม่พบข้อมูลผู้ใช้', 'error');
   social.profiles[id] = data;
 
   renderAvatar($('um-avatar'), data.avatar, nameOf(data));
@@ -1775,27 +1834,42 @@ async function openChatWith(id) {
 }
 
 // ---------- เมนูตัวเลือกของคนหนึ่งคน ----------
-function openPersonSheet(id, context) {
+function openPersonSheet(id, context, extra) {
   const info = friendInfo(id);
   const p = profileOf(id);
-  $('person-title').textContent = nameOf(p);
+  const grp = context === 'group' && extra ? state.groups[extra] : null;
+  const anon = !!(grp && grp.anonymous);
+  $('person-title').textContent = anon ? groupSenderName(grp, id) : nameOf(p);
   const box = $('person-actions');
   box.innerHTML = '';
   const add = (label, fn, cls) => box.appendChild(actionBtn(label, () => { closeModal('person-sheet'); fn(); }, cls || 'secondary-btn'));
 
-  add('ส่งข้อความ', () => openChatWith(id), 'primary-btn');
-  add('ดูโปรไฟล์', () => openUserProfile(id));
-  if (info.state === 'none') add('เพิ่มเป็นเพื่อน', () => sendFriendRequest(id));
-  if (info.state === 'sent') add('ยกเลิกคำขอเป็นเพื่อน', () => cancelRequest(id));
-  if (info.state === 'received') {
+  if (!anon) add('ส่งข้อความ', () => openChatWith(id), 'primary-btn');
+  if (!anon) add('ดูโปรไฟล์', () => openUserProfile(id));
+  if (!anon && info.state === 'none') add('เพิ่มเป็นเพื่อน', () => sendFriendRequest(id));
+  if (!anon && info.state === 'sent') add('ยกเลิกคำขอเป็นเพื่อน', () => cancelRequest(id));
+  if (!anon && info.state === 'received') {
     add('ยอมรับคำขอเป็นเพื่อน', () => respondRequest(id, true));
     add('ปฏิเสธคำขอ', () => respondRequest(id, false));
   }
-  add(social.muted.has(id) ? 'เปิดเสียงแจ้งเตือน' : 'ปิดเสียงแจ้งเตือน', () => toggleMute(id));
+  if (!anon) add(social.muted.has(id) ? 'เปิดเสียงแจ้งเตือน' : 'ปิดเสียงแจ้งเตือน', () => toggleMute(id));
   add(social.blocked.has(id) ? 'ปลดบล็อก' : 'บล็อก', () => toggleBlock(id), 'secondary-btn danger');
   add('รายงาน', () => openReport(id), 'secondary-btn danger');
   // ลบเพื่อนได้เฉพาะจากหน้า "เพื่อนทั้งหมด"
   if (info.state === 'friends' && context === 'friends') add('ลบเพื่อน', () => removeFriendConfirm(id), 'secondary-btn danger');
+  if (context === 'group' && extra && state.groups[extra] && id !== currentUser.id) {
+    const g = state.groups[extra];
+    const target = g.members.find(m => m.user_id === id);
+    if (target) {
+      if (g.role === 'owner') {
+        add(target.role === 'admin' ? 'ยกเลิกสิทธิ์ผู้ดูแล' : 'ตั้งเป็นผู้ดูแลกลุ่ม',
+            () => setGroupAdmin(extra, id, target.role !== 'admin'));
+      }
+      if (g.role === 'owner' || (g.role === 'admin' && target.role === 'member')) {
+        add('นำออกจากกลุ่ม', () => removeGroupMember(extra, id), 'secondary-btn danger');
+      }
+    }
+  }
   box.appendChild(actionBtn('ปิด', () => closeModal('person-sheet')));
   openModal('person-sheet');
 }
@@ -1929,6 +2003,7 @@ async function onFriendshipChange(payload) {
 
 // ---------- ลบข้อความทั้งแชท (ฝั่งตัวเอง) ด้วยการปัดซ้าย ----------
 async function clearChat(id) {
+  if (state.groups[id]) return clearGroupChat(id);
   const p = profileOf(id);
   const ok = await confirmDialog(
     'ลบข้อความทั้งหมด',
@@ -1998,6 +2073,495 @@ function attachSwipe(item, delBtn, onTap, onDelete) {
     onTap();
   });
   delBtn.onclick = () => { closeSwipe(); onDelete(); };
+}
+
+// ==================== แชทกลุ่ม (เฟส B2) ====================
+let groupModalMode = 'create';   // 'create' = สร้างกลุ่มใหม่, 'add' = เพิ่มสมาชิกเข้ากลุ่มเดิม
+let groupTargetId = null;
+let groupAvatarData = '';
+const picker = { selected: new Set(), exclude: new Set(), token: 0, timer: null };
+
+function isMuted(id) {
+  return social.muted.has(id) || !!(state.groups[id] && state.groups[id].muted);
+}
+
+function allChats() {
+  return [...Object.values(state.contacts), ...Object.values(state.groups || {})];
+}
+
+function hueOf(id) {
+  let h = 0;
+  for (const c of String(id || '')) h = (h * 31 + c.charCodeAt(0)) % 360;
+  return h;
+}
+
+async function loadGroups() {
+  const [g, m, a] = await Promise.all([
+    sb.from('groups').select('id, name, avatar, created_by, kind, anonymous'),
+    sb.from('group_members').select('group_id, user_id, role, muted, cleared_at'),
+    sb.rpc('my_anon_members')
+  ]);
+  if (g.error) throw g.error;
+  if (m.error) throw m.error;
+  if (a.error) throw a.error;
+
+  const me = currentUser.id;
+  const next = {};
+  (g.data || []).forEach(r => {
+    next[r.id] = { id: r.id, isGroup: true, name: r.name, avatar: r.avatar || '👥', kind: r.kind, anonymous: !!r.anonymous, aliases: {}, role: 'member', muted: false, members: [] };
+  });
+  (m.data || []).forEach(r => {
+    const x = next[r.group_id];
+    if (!x) return;
+    x.members.push({ user_id: r.user_id, role: r.role });
+    if (r.user_id === me) {
+      x.role = r.role;
+      x.muted = r.muted;
+      if (r.cleared_at) social.cleared[r.group_id] = new Date(r.cleared_at).getTime();
+    }
+  });
+  (a.data || []).forEach(r => { if (next[r.group_id]) next[r.group_id].aliases[r.user_id] = r.nickname; });
+  state.groups = next;
+  if (activeChat && activeChat.isGroup) activeChat = next[activeChat.id] || null;
+}
+
+// ---------- ตัวเลือกสมาชิก (ใช้ทั้งตอนสร้างกลุ่มและเพิ่มสมาชิก) ----------
+function openCreateGroup() {
+  groupModalMode = 'create';
+  groupTargetId = null;
+  groupAvatarData = '';
+  picker.selected = new Set();
+  picker.exclude = new Set();
+  $('gm-title').textContent = 'สร้างกลุ่มใหม่';
+  $('gm-submit').textContent = 'สร้างกลุ่ม';
+  $('gm-head').classList.remove('hidden-element');
+  $('gm-name').value = '';
+  $('gm-search').value = '';
+  $('gm-anon').checked = false;
+  $('gm-options').classList.remove('hidden-element');
+  setGroupKind('private');
+  onAnonToggle();
+  renderAvatar($('gm-avatar'), '👥', 'ก');
+  openModal('group-modal');
+  renderPicker();
+}
+
+function openAddMembers() {
+  const g = state.groups[groupTargetId];
+  if (!g) return;
+  groupModalMode = 'add';
+  picker.selected = new Set();
+  picker.exclude = new Set(g.members.map(m => m.user_id));
+  $('gm-title').textContent = 'เพิ่มสมาชิก';
+  $('gm-submit').textContent = 'เพิ่มสมาชิก';
+  $('gm-head').classList.add('hidden-element');
+  $('gm-options').classList.add('hidden-element');
+  $('gm-search').value = '';
+  openModal('group-modal');
+  renderPicker();
+}
+
+function pickGroupAvatarFile() { document.getElementById('gm-file').click(); }
+
+async function pickGroupAvatar(input) {
+  const file = input.files && input.files[0];
+  if (!file) return;
+  try {
+    groupAvatarData = await resizeImage(file, 128);
+    renderAvatar($('gm-avatar'), groupAvatarData, 'ก');
+  } catch (err) { toast(thaiError(err), 'error'); }
+  input.value = '';
+}
+
+function pickerSearch() {
+  clearTimeout(picker.timer);
+  picker.timer = setTimeout(renderPicker, 300);
+}
+
+function updatePickerCount() {
+  const n = picker.selected.size;
+  $('gm-count').textContent = n ? `(เลือกแล้ว ${n} คน)` : '';
+}
+
+function pickerRow(p) {
+  const row = personRow(p, p.search_id ? '@' + p.search_id : '');
+  row.classList.add('tap');
+  const box = document.createElement('input');
+  box.type = 'checkbox';
+  box.className = 'pick';
+  box.checked = picker.selected.has(p.id);
+  const toggle = () => {
+    if (picker.selected.has(p.id)) picker.selected.delete(p.id); else picker.selected.add(p.id);
+    box.checked = picker.selected.has(p.id);
+    updatePickerCount();
+  };
+  box.onclick = e => { e.stopPropagation(); toggle(); };
+  row.onclick = toggle;
+  row.appendChild(box);
+  return row;
+}
+
+async function renderPicker() {
+  const token = ++picker.token;
+  const box = $('gm-list');
+  const q = $('gm-search').value.trim().replace(/[%_\\,()]/g, '');
+  const ql = q.toLowerCase();
+  const fIds = friendIds();
+
+  const friends = (await ensureProfiles(fIds)).filter(p =>
+    !picker.exclude.has(p.id) &&
+    (!ql || nameOf(p).toLowerCase().includes(ql) || (p.search_id || '').toLowerCase().includes(ql)));
+
+  let others = [];
+  if (q.length >= 2) {
+    const { data } = await sb.rpc('search_profiles', { q });
+    others = (data || []).filter(p => !picker.exclude.has(p.id) && !fIds.includes(p.id));
+    others.forEach(p => { if (!social.profiles[p.id]) social.profiles[p.id] = p; });
+  }
+  if (token !== picker.token) return;
+
+  box.innerHTML = '';
+  const section = (title, list) => {
+    if (!list.length) return;
+    const t = document.createElement('div');
+    t.className = 'list-title';
+    t.textContent = title;
+    box.appendChild(t);
+    list.forEach(p => box.appendChild(pickerRow(p)));
+  };
+  section('เพื่อน', friends);
+  section('ผู้ใช้อื่น (ไม่ได้เป็นเพื่อนกัน)', others);
+  if (!friends.length && !others.length) {
+    box.appendChild(hintNode(q.length >= 2 ? 'ไม่พบรายชื่อ' : 'พิมพ์ชื่อหรือ ID เพื่อค้นหาผู้ใช้อื่น'));
+  }
+  updatePickerCount();
+}
+
+async function submitGroupModal() {
+  const members = [...picker.selected];
+  const btn = $('gm-submit');
+
+  if (groupModalMode === 'create') {
+    const name = $('gm-name').value.trim();
+    if (!name) return toast('กรุณาตั้งชื่อกลุ่ม', 'error');
+    setBusy(btn, true, 'กำลังสร้าง...');
+    const { data, error } = await sb.rpc('create_group', {
+      p_name: name, p_avatar: groupAvatarData, p_members: members,
+      p_kind: groupKind, p_anonymous: $('gm-anon').checked
+    });
+    setBusy(btn, false);
+    if (error) return handleDbError(error);
+    try { await loadGroups(); } catch (e) { return handleDbError(e); }
+    closeModal('group-modal');
+    if (state.groups[data]) selectChat(state.groups[data]);
+    loadChatList();
+    toast('สร้างกลุ่มเรียบร้อย', 'success');
+  } else {
+    if (!members.length) return toast('เลือกสมาชิกที่จะเพิ่มก่อน', 'error');
+    setBusy(btn, true, 'กำลังเพิ่ม...');
+    const { data, error } = await sb.rpc('add_group_members', { p_group: groupTargetId, p_members: members });
+    setBusy(btn, false);
+    if (error) return handleDbError(error);
+    try { await loadGroups(); } catch (e) { return handleDbError(e); }
+    closeModal('group-modal');
+    renderGroupInfo();
+    loadChatList();
+    toast(data > 0 ? `เพิ่มสมาชิก ${data} คนแล้ว` : 'ไม่สามารถเพิ่มสมาชิกที่เลือกได้', data > 0 ? 'success' : 'error');
+  }
+}
+
+// ---------- ข้อมูลกลุ่ม ----------
+function openChatInfo() {
+  if (!activeChat) return;
+  if (activeChat.isGroup) openGroupInfo(activeChat.id);
+  else openUserProfile(activeChat.id);
+}
+
+async function openGroupInfo(gid) {
+  groupTargetId = gid;
+  await renderGroupInfo();
+  openModal('ginfo-modal');
+}
+
+async function renderGroupInfo() {
+  const g = state.groups[groupTargetId];
+  if (!g) return;
+  const me = currentUser.id;
+  const isAdmin = g.role === 'owner' || g.role === 'admin';
+
+  // ข้อมูลของตัวเองแบบเต็ม (ไม่ผ่านการซ่อนตามสวิตช์)
+  social.profiles[me] = { id: me, username: currentUser.username, nickname: currentUser.nickname, avatar: currentUser.avatar, search_id: currentUser.searchId };
+
+  renderAvatar($('gi-avatar'), g.avatar, g.name);
+  $('gi-name').textContent = g.name;
+  $('gi-count').textContent = `สมาชิก ${g.members.length} คน`;
+  fillGroupTags($('gi-tags'), g);
+  $('gi-edit').classList.toggle('hidden-element', !isAdmin);
+  $('gi-name-input').value = g.name;
+  $('gi-add').classList.toggle('hidden-element', !isAdmin);
+  $('gi-muted').checked = !!g.muted;
+
+  let byId;
+  if (g.anonymous) {
+    // กลุ่มไม่แสดงตัวตน: ใช้ชื่อเล่นอย่างเดียว ไม่ดึงโปรไฟล์จริงของใคร
+    byId = Object.fromEntries(g.members.map(m => [m.user_id,
+      { id: m.user_id, nickname: m.user_id === me ? (currentUser.nickname || 'ผู้ใช้') : (g.aliases[m.user_id] || 'ผู้ใช้') }]));
+  } else {
+    const profs = await ensureProfiles(g.members.map(m => m.user_id));
+    byId = Object.fromEntries(profs.map(p => [p.id, p]));
+  }
+  const order = { owner: 0, admin: 1, member: 2 };
+  const members = g.members.slice().sort((a, b) =>
+    (order[a.role] - order[b.role]) || nameOf(byId[a.user_id]).localeCompare(nameOf(byId[b.user_id])));
+
+  const box = $('gi-members');
+  box.innerHTML = '';
+  members.forEach(m => {
+    const p = byId[m.user_id] || { id: m.user_id };
+    const roleText = m.role === 'owner' ? 'เจ้าของกลุ่ม' : m.role === 'admin' ? 'ผู้ดูแล' : '';
+    const row = personRow(p, [m.user_id === me ? 'คุณ' : '', roleText].filter(Boolean).join(' · '));
+    if (m.user_id !== me) {
+      const more = document.createElement('button');
+      more.type = 'button';
+      more.className = 'mini-btn ghost';
+      more.textContent = '⋯';
+      more.setAttribute('aria-label', 'ตัวเลือก');
+      more.onclick = () => openPersonSheet(m.user_id, 'group', groupTargetId);
+      row.appendChild(more);
+    }
+    box.appendChild(row);
+  });
+}
+
+function giAvatarClick() {
+  const g = state.groups[groupTargetId];
+  if (!g) return;
+  if (g.role === 'owner' || g.role === 'admin') { document.getElementById('gi-file').click(); return; }
+  if (g.avatar && (g.avatar.startsWith('http') || g.avatar.startsWith('data:'))) {
+    $('viewer-img').src = g.avatar;
+    openModal('image-viewer');
+  }
+}
+
+async function giChangeAvatar(input) {
+  const file = input.files && input.files[0];
+  if (!file) return;
+  try {
+    const avatar = await resizeImage(file, 128);
+    const { error } = await sb.rpc('update_group', { p_group: groupTargetId, p_name: null, p_avatar: avatar });
+    if (error) throw error;
+    await loadGroups();
+    renderGroupInfo();
+    loadChatList();
+    if (activeChat && activeChat.id === groupTargetId) selectChat(activeChat);
+    toast('เปลี่ยนรูปกลุ่มแล้ว', 'success');
+  } catch (err) { handleDbError(err); }
+  input.value = '';
+}
+
+async function saveGroupName() {
+  const name = $('gi-name-input').value.trim();
+  if (!name) return toast('กรุณาตั้งชื่อกลุ่ม', 'error');
+  const { error } = await sb.rpc('update_group', { p_group: groupTargetId, p_name: name, p_avatar: null });
+  if (error) return handleDbError(error);
+  await loadGroups();
+  renderGroupInfo();
+  loadChatList();
+  if (activeChat && activeChat.id === groupTargetId) selectChat(activeChat);
+  toast('เปลี่ยนชื่อกลุ่มแล้ว', 'success');
+}
+
+async function toggleGroupMute(checked) {
+  const { error } = await sb.rpc('set_group_muted', { p_group: groupTargetId, p_muted: checked });
+  if (error) { renderGroupInfo(); return handleDbError(error); }
+  await loadGroups();
+  toast(checked ? 'ปิดเสียงแจ้งเตือนกลุ่มแล้ว' : 'เปิดเสียงแจ้งเตือนกลุ่มแล้ว', 'success');
+}
+
+async function setGroupAdmin(gid, uid, admin) {
+  const { error } = await sb.rpc('set_group_admin', { p_group: gid, p_user: uid, p_admin: admin });
+  if (error) return handleDbError(error);
+  await loadGroups();
+  renderGroupInfo();
+}
+
+async function removeGroupMember(gid, uid) {
+  const ok = await confirmDialog('นำออกจากกลุ่ม', `นำ ${groupSenderName(state.groups[gid], uid)} ออกจากกลุ่มนี้ใช่หรือไม่?`, 'นำออก', true);
+  if (!ok) return;
+  const { error } = await sb.rpc('remove_group_member', { p_group: gid, p_user: uid });
+  if (error) return handleDbError(error);
+  await loadGroups();
+  renderGroupInfo();
+  loadChatList();
+}
+
+async function leaveGroupConfirm() {
+  const g = state.groups[groupTargetId];
+  if (!g) return;
+  const ok = await confirmDialog('ออกจากกลุ่ม',
+    `ต้องการออกจากกลุ่ม "${g.name}" ใช่หรือไม่?\nคุณจะไม่เห็นข้อความของกลุ่มนี้อีก`, 'ออกจากกลุ่ม', true);
+  if (!ok) return;
+  const gid = groupTargetId;
+  const { error } = await sb.rpc('leave_group', { p_group: gid });
+  if (error) return handleDbError(error);
+  closeModal('ginfo-modal');
+  try { await loadGroups(); } catch (e) { return handleDbError(e); }
+  if (activeChat && activeChat.id === gid) { activeChat = null; backToList(); }
+  loadChatList();
+  toast('ออกจากกลุ่มแล้ว', 'success');
+}
+
+// ลบข้อความทั้งกลุ่ม (เฉพาะฝั่งเรา ยังอยู่ในกลุ่มเหมือนเดิม)
+async function clearGroupChat(id) {
+  const g = state.groups[id];
+  const ok = await confirmDialog('ลบข้อความทั้งหมดในกลุ่ม',
+    `ลบข้อความทั้งหมดของกลุ่ม "${g ? g.name : ''}"?\nลบเฉพาะฝั่งคุณ สมาชิกคนอื่นยังเห็นข้อความเดิม\nและคุณยังอยู่ในกลุ่มเหมือนเดิม`, 'ลบข้อความ', true);
+  if (!ok) return;
+  const { error } = await sb.rpc('clear_group_chat', { p_group: id });
+  if (error) return handleDbError(error);
+  const last = lastMessageOf(id);
+  social.cleared[id] = Math.max(Date.now(), last ? last.ts + 1 : 0);
+  state.messages[id] = [];
+  delete lastRead[id];
+  saveLastRead();
+  if (activeChat && activeChat.id === id) loadMessages();
+  loadChatList();
+  toast('ลบข้อความเรียบร้อย', 'success');
+}
+
+// สมาชิกในกลุ่มเปลี่ยนแปลง / ถูกเพิ่ม / ถูกนำออก (เรียลไทม์)
+async function onGroupChange(payload) {
+  if (!currentUser) return;
+  const wasActiveId = activeChat && activeChat.isGroup ? activeChat.id : null;
+  const hadGroups = new Set(Object.keys(state.groups || {}));
+  try { await loadGroups(); } catch (e) { return; }
+
+  const row = payload.new || {};
+  if (payload.eventType === 'INSERT' && row.user_id === currentUser.id && row.group_id &&
+      !hadGroups.has(row.group_id) && state.groups[row.group_id] && state.groups[row.group_id].role !== 'owner') {
+    toast(`คุณถูกเพิ่มเข้ากลุ่ม ${state.groups[row.group_id].name}`, 'alert');
+    playSound('receive');
+  }
+  if (payload.eventType === 'DELETE' && payload.old && payload.old.user_id === currentUser.id) {
+    toast('คุณไม่ได้อยู่ในกลุ่มนี้แล้ว', 'info');
+  }
+
+  if (wasActiveId && !state.groups[wasActiveId]) { activeChat = null; backToList(); }
+  else if (wasActiveId) updateHeaderStatus();
+
+  loadChatList();
+  if (!$('ginfo-modal').classList.contains('hidden-element')) {
+    if (state.groups[groupTargetId]) renderGroupInfo(); else closeModal('ginfo-modal');
+  }
+}
+
+function previewText(chat, last) {
+  if (!last) return chat.isGroup ? 'เริ่มต้นการสนทนาของกลุ่ม' : 'เริ่มต้นการสนทนา';
+  if (last.kind === 'system') return last.text;
+  if (chat.isGroup) return (last.isMe ? 'คุณ' : groupSenderName(chat, last.senderId)) + ': ' + last.text;
+  return (last.isMe ? 'คุณ: ' : '') + last.text;
+}
+
+// ==================== ประเภทกลุ่ม / กลุ่มสาธารณะ / ไม่แสดงตัวตน (เฟส B3) ====================
+let groupKind = 'private';
+let searchTab = 'users';
+
+// ชื่อที่แสดงของผู้ส่งในกลุ่ม: กลุ่มไม่แสดงตัวตนจะเห็นแค่ชื่อเล่น
+function groupSenderName(g, uid) {
+  if (g && g.anonymous) return g.aliases[uid] || 'สมาชิกนิรนาม';
+  return nameOf(profileOf(uid));
+}
+
+function setGroupKind(kind) {
+  groupKind = kind;
+  $('gm-kind-private').classList.toggle('active', kind === 'private');
+  $('gm-kind-public').classList.toggle('active', kind === 'public');
+  $('gm-kind-hint').textContent = kind === 'private'
+    ? 'ส่วนตัว: เข้าร่วมได้เฉพาะคนที่ถูกเชิญ'
+    : 'สาธารณะ: ใครก็ค้นหากลุ่มเจอและเข้าร่วมเองได้';
+}
+
+function onAnonToggle() {
+  const on = $('gm-anon').checked;
+  const nick = currentUser.nickname || '';
+  const same = nick.trim().toLowerCase() === (currentUser.username || '').trim().toLowerCase();
+  $('gm-anon-hint').textContent = !on ? ''
+    : same
+      ? `⚠ ชื่อเล่นของคุณ "${nick}" เหมือนชื่อผู้ใช้ คนอื่นจะรู้ชื่อผู้ใช้ของคุณ ควรเปลี่ยนชื่อเล่นในโปรไฟล์ก่อน`
+      : `สมาชิกจะเห็นคุณในชื่อเล่น "${nick}" เท่านั้น (ไม่เห็นรูป ชื่อผู้ใช้ อีเมล และ ID)`;
+}
+
+function fillGroupTags(el, g) {
+  el.innerHTML = '';
+  const add = (text, cls) => {
+    const t = document.createElement('span');
+    t.className = 'tag-group ' + (cls || '');
+    t.textContent = text;
+    el.appendChild(t);
+  };
+  add(g.kind === 'public' ? 'กลุ่มสาธารณะ' : 'กลุ่มส่วนตัว');
+  if (g.anonymous) add('ไม่แสดงตัวตน', 'tag-anon');
+}
+
+// ---------- ค้นหากลุ่มสาธารณะ (แท็บในหน้าเพิ่มเพื่อน) ----------
+function setSearchTab(tab) {
+  searchTab = tab;
+  $('tab-users').classList.toggle('active', tab === 'users');
+  $('tab-groups').classList.toggle('active', tab === 'groups');
+  $('search-label').textContent = tab === 'users'
+    ? 'ค้นหาด้วยชื่อผู้ใช้ ชื่อเล่น หรือ ID'
+    : 'ค้นหากลุ่มสาธารณะด้วยชื่อกลุ่ม (เว้นว่างไว้เพื่อดูกลุ่มล่าสุด)';
+  $('user-search-input').placeholder = tab === 'users' ? 'พิมพ์อย่างน้อย 2 ตัวอักษร' : 'ชื่อกลุ่ม';
+  runUserSearch();
+}
+
+async function runGroupSearch() {
+  const q = $('user-search-input').value.trim().replace(/[%_\\,()]/g, '');
+  const token = ++searchToken;
+  setUserHint('กำลังค้นหา...');
+  const { data, error } = await sb.rpc('search_public_groups', { q });
+  if (token !== searchToken) return;
+  if (error) { setUserHint('ค้นหาไม่สำเร็จ'); return handleDbError(error); }
+  if (!data || !data.length) return setUserHint('ไม่พบกลุ่มสาธารณะ');
+
+  const box = $('user-search-results');
+  box.innerHTML = '';
+  data.forEach(g => {
+    const row = document.createElement('div');
+    row.className = 'user-row';
+    const av = document.createElement('div');
+    av.className = 'avatar group-av';
+    renderAvatar(av, g.avatar || '👥', g.name);
+    const name = document.createElement('span');
+    name.className = 'name';
+    name.textContent = g.name;
+    const sub = document.createElement('span');
+    sub.className = 'sub';
+    sub.textContent = `${g.member_count} สมาชิก` + (g.anonymous ? ' · ไม่แสดงตัวตน' : '');
+    name.appendChild(sub);
+    const btn = document.createElement('button');
+    btn.className = 'mini-btn';
+    btn.textContent = g.joined ? 'เปิดกลุ่ม' : 'เข้าร่วม';
+    btn.onclick = () => joinPublicGroup(g);
+    row.append(av, name, btn);
+    box.appendChild(row);
+  });
+}
+
+async function joinPublicGroup(g) {
+  if (state.groups[g.id]) { toggleSearchModal(false); selectChat(state.groups[g.id]); return; }
+  if (g.anonymous) {
+    const ok = await confirmDialog('เข้าร่วมกลุ่มไม่แสดงตัวตน',
+      `สมาชิกในกลุ่มจะเห็นคุณในชื่อเล่น "${currentUser.nickname}" เท่านั้น\n(ไม่เห็นรูป ชื่อผู้ใช้ อีเมล และ ID)\nเข้าร่วมกลุ่ม "${g.name}" หรือไม่?`, 'เข้าร่วม');
+    if (!ok) return;
+  }
+  const { error } = await sb.rpc('join_public_group', { p_group: g.id });
+  if (error) return handleDbError(error);
+  try { await loadGroups(); } catch (e) { return handleDbError(e); }
+  toggleSearchModal(false);
+  if (state.groups[g.id]) selectChat(state.groups[g.id]);
+  loadChatList();
+  toast('เข้าร่วมกลุ่มแล้ว', 'success');
 }
 
 // ==================== Service Worker ====================
