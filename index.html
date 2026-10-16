@@ -2,7 +2,7 @@
 <html lang="th">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
   <meta name="theme-color" content="#0b0b12">
   <title>DarkChat</title>
   <link rel="icon" href="icon.svg" type="image/svg+xml">
@@ -53,6 +53,7 @@
             </div>
           </div>
           <button type="submit" class="primary-btn" id="login-btn">เข้าสู่ระบบ</button>
+          <div style="text-align:center"><button type="button" class="link-btn" style="margin-top:14px" onclick="forgotPassword()">ลืมรหัสผ่าน?</button></div>
         </form>
 
         <form id="register-form" class="hidden-element" onsubmit="handleRegister(event)">
@@ -144,6 +145,9 @@
         <div id="friend-banner" class="friend-banner hidden-element"></div>
 
         <div class="messages-container" id="messages-container"></div>
+        <button type="button" id="scroll-down-btn" class="scroll-down hidden-element" onclick="scrollToLatest()" aria-label="เลื่อนลงข้อความล่าสุด">
+          <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M6 13l6 6 6-6"/></svg>
+        </button>
 
         <div id="typing-status" class="typing-indicator hidden-element"></div>
 
@@ -369,6 +373,31 @@
     </div>
   </div>
 
+  <!-- ตั้งรหัสผ่านใหม่ (จากลิงก์ในอีเมล) -->
+  <div id="recovery-modal" class="modal hidden-element">
+    <div class="modal-content">
+      <h3>ตั้งรหัสผ่านใหม่</h3>
+      <div class="input-group">
+        <label for="rc-new">รหัสผ่านใหม่ (อย่างน้อย 6 ตัว)</label>
+        <div class="pw-wrap">
+          <input type="password" id="rc-new" autocomplete="new-password">
+          <button type="button" class="pw-toggle" data-for="rc-new" aria-label="แสดงรหัสผ่าน"></button>
+        </div>
+      </div>
+      <div class="input-group">
+        <label for="rc-confirm">ยืนยันรหัสผ่านใหม่</label>
+        <div class="pw-wrap">
+          <input type="password" id="rc-confirm" autocomplete="new-password">
+          <button type="button" class="pw-toggle" data-for="rc-confirm" aria-label="แสดงรหัสผ่าน"></button>
+        </div>
+      </div>
+      <div class="modal-actions">
+        <button class="secondary-btn" onclick="cancelRecovery()">ยกเลิก</button>
+        <button class="primary-btn" id="rc-submit-btn" onclick="finishRecovery()">ตั้งรหัสผ่านใหม่</button>
+      </div>
+    </div>
+  </div>
+
   <!-- ข้อมูลกลุ่ม -->
   <div id="ginfo-modal" class="modal hidden-element" onclick="if(event.target===this)closeModal('ginfo-modal')">
     <div class="modal-content">
@@ -388,6 +417,10 @@
         <label class="switch">
           <input type="checkbox" id="gi-muted" onchange="toggleGroupMute(this.checked)"><span class="slider"></span>
         </label>
+      </div>
+      <div id="gi-invites-wrap" class="hidden-element">
+        <div class="list-title" style="margin-top:14px">คำขอเพิ่มสมาชิกรออนุมัติ <span id="gi-invites-count" class="hint inline"></span></div>
+        <div id="gi-invites"></div>
       </div>
       <div class="list-title" style="margin-top:14px">สมาชิก</div>
       <div id="gi-members" class="user-results tall"></div>
