@@ -680,3 +680,29 @@ body[data-mode="light"] ::-webkit-scrollbar-thumb { background: rgba(20, 20, 40,
 .tag-anon { background: rgba(140, 140, 160, 0.2); color: var(--text-muted); }
 .gi-tags { display: flex; flex-wrap: wrap; justify-content: center; gap: 6px; margin-top: 6px; }
 .gi-tags .tag-group { margin-left: 0; }
+
+
+/* ================= เฟส C: ปิดการซูม / สถานะข้อความ / วันที่ ================= */
+html, body { touch-action: manipulation; -webkit-text-size-adjust: 100%; }
+@media (pointer: coarse) { input, select, textarea { font-size: 16px !important; } }
+
+.chat-area { position: relative; }
+.date-divider {
+  align-self: center; margin: 8px 0 2px; padding: 3px 14px; border-radius: 999px;
+  background: var(--bg-hover); color: var(--text-muted); font-size: 0.72rem;
+}
+.msg-status { margin-left: 2px; font-size: 0.7rem; }
+.msg-status.read { color: #7dd3fc; font-weight: 600; }
+.msg-status.failed { color: #fecaca; font-weight: 600; }
+.retry-row { display: flex; gap: 6px; margin-top: 6px; justify-content: flex-end; }
+.load-older {
+  align-self: center; margin-bottom: 6px; padding: 6px 14px; border-radius: 999px; cursor: pointer;
+  border: 1px solid var(--border-color); background: var(--bg-solid); color: var(--text-muted); font-size: 0.78rem;
+}
+.scroll-down {
+  position: absolute; right: 16px; bottom: 86px; z-index: 5;
+  width: 40px; height: 40px; border-radius: 50%; cursor: pointer;
+  display: grid; place-items: center;
+  border: 1px solid var(--border-color); background: var(--bg-solid); color: var(--text-main);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.35);
+}
