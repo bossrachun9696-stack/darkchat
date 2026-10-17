@@ -58,6 +58,9 @@ function thaiError(error) {
   if (/rate limit/i.test(msg)) return 'ทำรายการบ่อยเกินไป กรุณารอสักครู่';
   if (/should be different|same as the old/i.test(msg)) return 'รหัสผ่านใหม่ต้องไม่ซ้ำกับรหัสเดิม';
   if (/too_many_new_chats/i.test(msg)) return 'เริ่มแชทกับคนใหม่ได้ไม่เกิน 20 คนต่อวัน';
+  if (/cannot_edit/i.test(msg)) return 'แก้ไขไม่ได้แล้ว (แก้ไขได้ภายใน 15 นาทีหลังส่ง)';
+  if (/too_many_pins/i.test(msg)) return 'ปักหมุดได้ไม่เกิน 5 ข้อความต่อห้อง';
+  if (/cannot_pin_timed/i.test(msg)) return 'ปักหมุดข้อความที่ตั้งเวลาลบไม่ได้';
   if (/too_many_groups/i.test(msg)) return 'สร้างกลุ่มได้ไม่เกิน 10 กลุ่มต่อวัน';
   if (/not_found/i.test(msg)) return 'ไม่พบคำขอนี้ (อาจมีผู้ดูแลคนอื่นจัดการไปแล้ว)';
   if (/group_full/i.test(msg)) return 'กลุ่มนี้เต็มแล้ว';
@@ -71,7 +74,7 @@ function thaiError(error) {
 function handleDbError(error) {
   const msg = (error && error.message) || '';
   if ((error && (error.code === '42P01' || error.code === '42703')) || /does not exist|schema cache|Could not find the (table|function)/i.test(msg)) {
-    toast('ฐานข้อมูลยังตั้งค่าไม่ครบ กรุณารันไฟล์ supabase.sql, supabase-push.sql, supabase-phase-a.sql, supabase-phase-b.sql, supabase-phase-b2.sql, supabase-phase-b3.sql และ supabase-phase-c.sql ใน SQL Editor ของ Supabase', 'error');
+    toast('ฐานข้อมูลยังตั้งค่าไม่ครบ กรุณารันไฟล์ supabase.sql, supabase-push.sql, supabase-phase-a.sql, supabase-phase-b.sql, supabase-phase-b2.sql, supabase-phase-b3.sql, supabase-phase-c.sql และ supabase-phase-d1.sql ใน SQL Editor ของ Supabase', 'error');
   } else {
     toast(thaiError(error), 'error');
   }
@@ -144,6 +147,9 @@ async function enterApp(user) {
     subscribeRealtime();
     loadChatList();
     renderSocialUI();
+    touchLastSeen();
+    clearInterval(seenTimer);
+    seenTimer = setInterval(touchLastSeen, 120000);
 
     // ผูกอุปกรณ์นี้กับบัญชีที่เพิ่งล็อกอิน เพื่อให้ได้รับ Push (ถ้าเคยอนุญาตไว้)
     if (pushSupported() && Notification.permission === 'granted') {
@@ -165,6 +171,7 @@ async function enterApp(user) {
 }
 
 function leaveApp() {
+  clearInterval(seenTimer);
   unsubscribeRealtime();
   hidePin();
   toggleGearMenu(false);
@@ -369,6 +376,7 @@ function updateUserProfileUI() {
   const hasId = !!currentUser.searchId;
   $('pf-id-view').textContent = hasId ? '@' + currentUser.searchId : '';
   $('pf-id-view').classList.toggle('hidden-element', !hasId);
+  $('pf-id-copy').classList.toggle('hidden-element', !hasId);
   $('pf-id-create').classList.toggle('hidden-element', hasId);
   $('pf-id-switch').classList.toggle('hidden-element', !hasId);
 }
@@ -510,6 +518,9 @@ function toLocal(row) {
     kind: row.kind || 'text',
     readAt: row.read_at ? new Date(row.read_at).getTime() : null,
     status: 'sent',
+    replyTo: row.reply_to || null,
+    editedAt: row.edited_at ? new Date(row.edited_at).getTime() : null,
+    pinnedAt: row.pinned_at ? new Date(row.pinned_at).getTime() : null,
     expiresAt: exp,
     timer: exp ? Math.round((exp - ts) / 1000) : null
   };
@@ -525,7 +536,7 @@ function addLocal(partnerId, msg) {
 }
 
 async function fetchContact(id) {
-  const { data } = await sb.from('public_profiles').select('id, nickname, username, avatar, email, search_id').eq('id', id).maybeSingle();
+  const { data } = await sb.from('public_profiles').select('id, nickname, username, avatar, email, search_id, last_seen_at').eq('id', id).maybeSingle();
   if (data) { state.contacts[id] = data; saveContacts(); }
   return data;
 }
@@ -566,7 +577,7 @@ async function loadInitialData() {
 
   if (ids.size) {
     const { data: profiles, error: pErr } = await sb.from('public_profiles')
-      .select('id, nickname, username, avatar, email, search_id').in('id', [...ids]);
+      .select('id, nickname, username, avatar, email, search_id, last_seen_at').in('id', [...ids]);
     if (pErr) { handleDbError(pErr); return; }
     profiles.forEach(p => { state.contacts[p.id] = p; });
   }
@@ -861,7 +872,10 @@ async function openChatById(id) {
 // ==================== รายการแชท ====================
 function lastMessageOf(chatId) {
   const list = state.messages[chatId] || [];
-  return list[list.length - 1] || null;
+  for (let i = list.length - 1; i >= 0; i--) {
+    if (!social.hidden.has(list[i].id)) return list[i];
+  }
+  return null;
 }
 
 function loadChatList(filtered = null) {
@@ -946,8 +960,16 @@ function loadChatList(filtered = null) {
     del.type = 'button';
     del.className = 'swipe-del';
     del.textContent = 'ลบ';
-    wrap.append(del, item);
-    attachSwipe(item, del, () => selectChat(chat), () => clearChat(chat.id));
+    const prof = document.createElement('button');
+    prof.type = 'button';
+    prof.className = 'swipe-prof';
+    prof.textContent = chat.isGroup ? 'ข้อมูล' : 'โปรไฟล์';
+    wrap.append(prof, del, item);
+    attachSwipe(item, del, prof,
+      () => selectChat(chat),
+      () => clearChat(chat.id),
+      () => (chat.isGroup ? openGroupInfo(chat.id) : openUserProfile(chat.id)),
+      () => peekChat(chat));
     listEl.appendChild(wrap);
   });
 }
@@ -1042,6 +1064,8 @@ function resetChatView() {
   $('friend-banner').classList.add('hidden-element');
   $('chat-area').classList.remove('group-mode');
   $('scroll-down-btn').classList.add('hidden-element');
+  $('pin-bar').classList.add('hidden-element');
+  clearComposerMode();
   $('active-chat-title').textContent = 'ยินดีต้อนรับสู่ DarkChat';
   $('active-chat-subtitle').textContent = 'เลือกแชทเพื่อเริ่มสนทนา';
   renderAvatar($('active-chat-avatar'), '💬', 'D');
@@ -1068,7 +1092,9 @@ function updateHeaderStatus() {
     $('active-chat-subtitle').textContent = '';
     return;
   }
-  $('active-chat-subtitle').textContent = isOnline(activeChat.id) ? 'ออนไลน์อยู่' : 'ออฟไลน์';
+  if (isOnline(activeChat.id)) $('active-chat-subtitle').textContent = 'ออนไลน์อยู่';
+  else if (activeChat.last_seen_at) $('active-chat-subtitle').textContent = `ใช้งานเมื่อ ${agoText(activeChat.last_seen_at)}`;
+  else $('active-chat-subtitle').textContent = 'ออฟไลน์';
 }
 
 function selectChat(chat) {
@@ -1090,6 +1116,10 @@ function selectChat(chat) {
   loadChatList();
   updateFriendBanner();
   updateComposerState();
+  clearComposerMode();
+  autoGrow();
+  loadPins(activeChat);
+  refreshLastSeen(activeChat);
   if (window.matchMedia('(min-width: 761px)').matches) $('message-input').focus();
 }
 
@@ -1101,13 +1131,107 @@ function backToList() {
   loadChatList();
 }
 
+// ==================== เฟส D1: หน้าตาแชท เมนูข้อความ ตอบกลับ แก้ไข ปักหมุด แอบดู ====================
+const composer = { type: null, msg: null };   // type: 'reply' | 'edit' | null
+let pinsToken = 0;
+let seenTimer = null;
+
+function snippetOf(m) {
+  const t = (m && m.text) || '';
+  return t.length > 80 ? t.slice(0, 80) + '…' : t;
+}
+
+function senderLabel(chat, m) {
+  if (m.isMe) return 'คุณ';
+  return chat.isGroup ? groupSenderName(chat, m.senderId) : nameOf(chat);
+}
+
+// ป้ายเวลากลางจอ เช่น "08:43", "จันทร์ 08:43"
+function dividerLabel(ts) {
+  const d = new Date(ts), now = new Date();
+  const hm = d.toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit' });
+  if (d.toDateString() === now.toDateString()) return hm;
+  if (d.toDateString() === new Date(now - 86400000).toDateString()) return 'เมื่อวาน ' + hm;
+  if (now - d < 6 * 86400000) return d.toLocaleDateString('th-TH', { weekday: 'long' }) + ' ' + hm;
+  return d.toLocaleDateString('th-TH', { day: 'numeric', month: 'short', year: 'numeric' }) + ' ' + hm;
+}
+
+function agoText(ts) {
+  const s = Math.max(0, (Date.now() - new Date(ts).getTime()) / 1000);
+  if (s < 60) return 'เมื่อสักครู่';
+  if (s < 3600) return `${Math.floor(s / 60)} นาที ที่แล้ว`;
+  if (s < 86400) return `${Math.floor(s / 3600)} ชม. ที่แล้ว`;
+  return `${Math.floor(s / 86400)} วัน ที่แล้ว`;
+}
+
+function visibleMessages(chat) {
+  return (state.messages[chat.id] || []).filter(m =>
+    !social.hidden.has(m.id) && !(chat.isGroup && !m.isMe && social.blocked.has(m.senderId)));
+}
+
+// ---------- ข้อความที่ถูกตอบ (เก็บแค่รหัส ถ้าถูกลบจะขึ้นว่าถูกลบแล้ว) ----------
+function findMessage(id) {
+  for (const k in state.messages) {
+    const m = state.messages[k].find(x => x.id === id);
+    if (m) return m;
+  }
+  for (const k in (state.pins || {})) {
+    const m = state.pins[k].find(x => x.id === id);
+    if (m) return m;
+  }
+  return null;
+}
+
+function resolveRef(id) {
+  const m = findMessage(id);
+  if (m) return m;
+  state.refs = state.refs || {};
+  if (state.refs[id] === undefined) { state.refs[id] = 'loading'; fetchRef(id); }
+  return state.refs[id]; // 'loading' | false (ถูกลบ) | ข้อความ
+}
+
+async function fetchRef(id) {
+  const { data } = await sb.from('messages').select('*').eq('id', id).maybeSingle();
+  state.refs[id] = data ? toLocal(data) : false;
+  if (activeChat) loadMessages(true);
+}
+
+function buildReplyRef(msg) {
+  const ref = document.createElement('div');
+  ref.className = 'reply-ref';
+  const r = resolveRef(msg.replyTo);
+  const name = document.createElement('strong');
+  const txt = document.createElement('span');
+  if (r && r !== 'loading') {
+    name.textContent = senderLabel(activeChat, r);
+    txt.textContent = snippetOf(r);
+    ref.onclick = e => { e.stopPropagation(); scrollToMessage(r.id); };
+  } else {
+    name.textContent = 'ข้อความเดิม';
+    txt.textContent = r === 'loading' ? 'กำลังโหลด…' : 'ข้อความถูกลบแล้ว';
+  }
+  ref.append(name, txt);
+  return ref;
+}
+
+function scrollToMessage(id) {
+  const el = [...$('messages-container').children].find(c => c.dataset && c.dataset.id === id);
+  if (!el) return toast('ข้อความนี้อยู่ไกลขึ้นไป เลื่อนขึ้นเพื่อโหลดข้อความเก่าก่อน', 'info');
+  el.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  el.classList.remove('flash');
+  void el.offsetWidth;
+  el.classList.add('flash');
+}
+
+// ---------- แสดงข้อความ (สไตล์แอปแชททั่วไป: รูปคู่สนทนา ป้ายเวลากลางจอ) ----------
 function loadMessages(keepScroll) {
   const container = $('messages-container');
   const prevTop = container.scrollTop;
   container.innerHTML = '';
   if (!activeChat) return;
+  updatePinBar();
 
-  const list = state.messages[activeChat.id] || [];
+  const list = visibleMessages(activeChat);
   if (list.length === 0) {
     container.innerHTML =
       '<div class="empty-state"><div class="empty-icon">✨</div><p>ยังไม่มีข้อความ<br>ทักทายเป็นคนแรกได้เลย</p></div>';
@@ -1123,17 +1247,19 @@ function loadMessages(keepScroll) {
     container.appendChild(more);
   }
 
-  let lastDay = '';
-  list.forEach(msg => {
-    if (activeChat.isGroup && !msg.isMe && social.blocked.has(msg.senderId)) return;
-    const day = new Date(msg.ts).toDateString();
-    if (day !== lastDay) {
-      lastDay = day;
+  const GAP = 30 * 60 * 1000;
+  const sameDay = (a, b) => new Date(a).toDateString() === new Date(b).toDateString();
+  let prev = null;
+
+  list.forEach((msg, i) => {
+    if (!prev || msg.ts - prev.ts > GAP || !sameDay(msg.ts, prev.ts)) {
       const divider = document.createElement('div');
       divider.className = 'date-divider';
-      divider.textContent = dayLabel(msg.ts);
+      divider.textContent = dividerLabel(msg.ts);
       container.appendChild(divider);
     }
+    prev = msg;
+
     if (msg.kind === 'system') {
       const sys = document.createElement('div');
       sys.className = 'system-msg';
@@ -1141,24 +1267,41 @@ function loadMessages(keepScroll) {
       container.appendChild(sys);
       return;
     }
-    const bubble = document.createElement('div');
-    bubble.className = 'message-bubble ' + (msg.isMe ? 'sent' : 'received');
 
-    if (msg.isMe) {
-      const del = document.createElement('button');
-      del.className = 'delete-msg-btn';
-      del.title = 'ลบข้อความ';
-      del.setAttribute('aria-label', 'ลบข้อความ');
-      del.textContent = '🗑️';
-      del.onclick = () => deleteMessage(msg.id);
-      bubble.appendChild(del);
-    } else if (activeChat.isGroup) {
+    const next = list[i + 1];
+    const endOfRun = !next || next.kind === 'system' || next.isMe !== msg.isMe ||
+      next.senderId !== msg.senderId || next.ts - msg.ts > GAP || !sameDay(msg.ts, next.ts);
+
+    const row = document.createElement('div');
+    row.className = 'msg-row ' + (msg.isMe ? 'sent' : 'received');
+    row.dataset.id = msg.id;
+
+    if (!msg.isMe) {
+      const av = document.createElement('div');
+      av.className = 'avatar msg-avatar' + (endOfRun ? '' : ' spacer');
+      if (endOfRun) {
+        if (activeChat.isGroup) {
+          const p = activeChat.anonymous ? null : profileOf(msg.senderId);
+          renderAvatar(av, p && p.avatar, groupSenderName(activeChat, msg.senderId));
+        } else {
+          renderAvatar(av, activeChat.avatar, nameOf(activeChat));
+        }
+      }
+      row.appendChild(av);
+    }
+
+    const bubble = document.createElement('div');
+    bubble.className = 'message-bubble ' + (msg.isMe ? 'sent' : 'received') + (msg.status === 'failed' ? ' failed' : '');
+
+    if (!msg.isMe && activeChat.isGroup) {
       const who = document.createElement('span');
       who.className = 'msg-sender';
       who.textContent = groupSenderName(activeChat, msg.senderId);
-      who.style.color = `hsl(${hueOf(msg.senderId)} 65% 55%)`;
+      who.style.color = `hsl(${hueOf(msg.senderId)} 65% 62%)`;
       bubble.appendChild(who);
     }
+
+    if (msg.replyTo) bubble.appendChild(buildReplyRef(msg));
 
     const text = document.createElement('span');
     text.textContent = msg.text;
@@ -1166,12 +1309,14 @@ function loadMessages(keepScroll) {
 
     const meta = document.createElement('div');
     meta.className = 'message-meta';
+    if (msg.pinnedAt) { const pin = document.createElement('span'); pin.textContent = '📌'; meta.appendChild(pin); }
     if (msg.timer) {
       const badge = document.createElement('span');
       badge.className = 'timer-badge';
       badge.textContent = `⏱ ${msg.timer} วิ`;
       meta.appendChild(badge);
     }
+    if (msg.editedAt) { const ed = document.createElement('span'); ed.textContent = 'แก้ไขแล้ว'; meta.appendChild(ed); }
     const time = document.createElement('span');
     time.textContent = fmtClock(msg.ts);
     meta.appendChild(time);
@@ -1196,26 +1341,200 @@ function loadMessages(keepScroll) {
       bubble.appendChild(retry);
     }
 
-    container.appendChild(bubble);
+    row.appendChild(bubble);
+    container.appendChild(row);
+    attachMessageGestures(row, bubble, msg);
   });
 
   container.scrollTop = keepScroll ? prevTop : container.scrollHeight;
 }
 
-// ==================== เฟส C: ความเสถียรของแชท ====================
+// กดค้างที่ข้อความ = เมนู, ปัดเข้าหาตรงกลาง = ตอบกลับ
+function attachMessageGestures(row, bubble, msg) {
+  const dir = msg.isMe ? -1 : 1;
+  let sx = 0, sy = 0, dx = 0, timer = null, dragging = false, swiping = false, opened = false;
 
-// ---------- ส่งข้อความ: แสดงทันที + สถานะ กำลังส่ง/ส่งแล้ว/ส่งไม่สำเร็จ (กดส่งใหม่ได้) ----------
+  bubble.addEventListener('pointerdown', e => {
+    if (e.button) return;
+    sx = e.clientX; sy = e.clientY; dx = 0; dragging = true; swiping = false; opened = false;
+    clearTimeout(timer);
+    timer = setTimeout(() => {
+      opened = true; dragging = false;
+      if (navigator.vibrate) navigator.vibrate(12);
+      openMsgMenu(msg);
+    }, 450);
+  });
+  bubble.addEventListener('pointermove', e => {
+    if (!dragging) return;
+    const x = e.clientX - sx, y = e.clientY - sy;
+    if (!swiping && (Math.abs(x) > 8 || Math.abs(y) > 8)) {
+      clearTimeout(timer);
+      if (Math.abs(x) > Math.abs(y) && x * dir > 0) {
+        swiping = true;
+        bubble.setPointerCapture(e.pointerId);
+        bubble.style.transition = 'none';
+        row.classList.add('swiping');
+      } else { dragging = false; return; }
+    }
+    if (swiping) {
+      dx = Math.max(0, Math.min(80, x * dir));
+      bubble.style.transform = `translateX(${dx * dir}px)`;
+      row.classList.toggle('reply-ready', dx >= 56);
+    }
+  });
+  const end = () => {
+    clearTimeout(timer);
+    if (swiping) {
+      bubble.style.transition = '';
+      bubble.style.transform = '';
+      if (dx >= 56) { if (navigator.vibrate) navigator.vibrate(10); startReply(msg); }
+      row.classList.remove('swiping', 'reply-ready');
+    }
+    dragging = false; swiping = false;
+  };
+  bubble.addEventListener('pointerup', end);
+  bubble.addEventListener('pointercancel', end);
+  bubble.addEventListener('contextmenu', e => { e.preventDefault(); clearTimeout(timer); if (!opened) openMsgMenu(msg); });
+}
+
+// ---------- เมนูกดค้างที่ข้อความ ----------
+function msgCanUnsend(m) {
+  if (!m.isMe || m.status !== 'sent' || m.kind !== 'text') return false;
+  if (activeChat.isGroup) return Date.now() - m.ts < 5 * 60 * 1000;
+  return !m.readAt; // เพื่อนยังไม่ได้อ่าน
+}
+function msgCanEdit(m) {
+  return m.isMe && m.status === 'sent' && m.kind === 'text' && Date.now() - m.ts < 15 * 60 * 1000;
+}
+function canPin(m) {
+  if (!activeChat || m.kind !== 'text' || m.status !== 'sent') return false;
+  if (activeChat.isGroup) return activeChat.role === 'owner' || activeChat.role === 'admin';
+  return true;
+}
+
+function openMsgMenu(msg) {
+  if (!activeChat) return;
+  $('msg-menu-preview').textContent = snippetOf(msg);
+  const box = $('msg-menu-actions');
+  box.innerHTML = '';
+  const add = (label, fn, cls) => box.appendChild(actionBtn(label, () => { closeModal('msg-menu'); fn(); }, cls || 'secondary-btn'));
+
+  if (msg.status === 'sent') add('ตอบกลับ', () => startReply(msg), 'primary-btn');
+  add('คัดลอก', () => copyText(msg.text));
+  if (msgCanUnsend(msg)) add('ยกเลิกการส่ง', () => unsendMessage(msg), 'secondary-btn danger');
+  if (msgCanEdit(msg)) add('แก้ไข', () => startEdit(msg));
+  if (canPin(msg)) add(msg.pinnedAt ? 'เลิกปักหมุด' : 'ปักหมุด', () => togglePin(msg));
+  add('ลบ', () => hideForMe(msg), 'secondary-btn danger');
+  box.appendChild(actionBtn('ปิด', () => closeModal('msg-menu')));
+  openModal('msg-menu');
+}
+
+async function copyText(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch (e) {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.cssText = 'position:fixed;opacity:0;top:0;left:0';
+    document.body.appendChild(ta);
+    ta.select();
+    try { document.execCommand('copy'); } catch (_) { /* ไม่เป็นไร */ }
+    ta.remove();
+  }
+  toast('คัดลอกแล้ว', 'success');
+}
+
+function copyMyId() { if (currentUser && currentUser.searchId) copyText(currentUser.searchId); }
+
+async function unsendMessage(m) {
+  const ok = await confirmDialog('ยกเลิกการส่ง', 'ยกเลิกการส่งข้อความนี้?\nข้อความจะถูกลบออกจากแชทของทุกคน', 'ยกเลิกการส่ง', true);
+  if (ok) deleteMessage(m.id);
+}
+
+// ลบเฉพาะฝั่งเรา (อีกฝั่งยังเห็น)
+async function hideForMe(m) {
+  if (String(m.id).startsWith('tmp_')) return deleteMessage(m.id);
+  const ok = await confirmDialog('ลบข้อความ', 'ลบข้อความนี้ออกจากแชทของคุณ?\nอีกฝั่งยังเห็นข้อความนี้อยู่', 'ลบ', true);
+  if (!ok) return;
+  const { error } = await sb.from('hidden_messages').insert({ message_id: m.id });
+  if (error) return handleDbError(error);
+  social.hidden.add(m.id);
+  loadMessages(true);
+  loadChatList();
+  toast('ลบข้อความแล้ว (เฉพาะฝั่งคุณ)', 'success');
+}
+
+// ---------- ตอบกลับ / แก้ไข (แถบเหนือช่องพิมพ์) ----------
+function renderComposerBar() {
+  const bar = $('composer-bar');
+  if (!composer.type || !activeChat) { bar.classList.add('hidden-element'); return; }
+  $('cb-title').textContent = composer.type === 'edit' ? 'แก้ไขข้อความ' : `ตอบกลับ ${senderLabel(activeChat, composer.msg)}`;
+  $('cb-snippet').textContent = snippetOf(composer.msg);
+  bar.classList.remove('hidden-element');
+}
+
+function clearComposerMode() {
+  if (composer.type === 'edit') { $('message-input').value = ''; autoGrow(); }
+  composer.type = null;
+  composer.msg = null;
+  renderComposerBar();
+}
+
+function startReply(m) {
+  if (!activeChat || m.status !== 'sent' || $('message-input').disabled) return;
+  if (composer.type === 'edit') { $('message-input').value = ''; autoGrow(); }
+  composer.type = 'reply';
+  composer.msg = m;
+  renderComposerBar();
+  $('message-input').focus();
+}
+
+function startEdit(m) {
+  composer.type = 'edit';
+  composer.msg = m;
+  const input = $('message-input');
+  input.value = m.text;
+  autoGrow();
+  renderComposerBar();
+  input.focus();
+}
+
+async function submitEdit(text) {
+  const m = composer.msg;
+  const input = $('message-input');
+  if (text === m.text) { clearComposerMode(); return; }
+  const { error } = await sb.rpc('edit_message', { p_id: m.id, p_text: text });
+  if (error) {
+    input.value = text; autoGrow();
+    return toast(/cannot_edit/.test(error.message) ? 'แก้ไขไม่ได้แล้ว (แก้ไขได้ภายใน 15 นาทีหลังส่ง)' : thaiError(error), 'error');
+  }
+  m.text = text;
+  m.editedAt = Date.now();
+  composer.type = null; composer.msg = null;
+  renderComposerBar();
+  loadMessages(true);
+  loadChatList();
+}
+
 async function sendMessage(e) {
   e.preventDefault();
   const input = $('message-input');
   const text = input.value.trim();
   if (!text || !activeChat) return;
-  if (social.blocked.has(activeChat.id)) return toast('คุณบล็อกผู้ใช้นี้ไว้ ปลดบล็อกก่อนจึงจะส่งข้อความได้', 'error');
+  if (!activeChat.isGroup && social.blocked.has(activeChat.id)) return toast('คุณบล็อกผู้ใช้นี้ไว้ ปลดบล็อกก่อนจึงจะส่งข้อความได้', 'error');
+  input.focus(); // ให้คีย์บอร์ดบนมือถือยังเปิดอยู่ พิมพ์ต่อได้ทันที
+
+  if (composer.type === 'edit') {
+    input.value = ''; autoGrow();
+    return submitEdit(text);
+  }
 
   const chat = activeChat;
   const seconds = parseInt($('auto-delete-timer').value, 10) || 0;
+  const replyTo = composer.type === 'reply' ? composer.msg.id : null;
   input.value = '';
-  input.focus(); // ให้คีย์บอร์ดบนมือถือยังเปิดอยู่ พิมพ์ต่อได้ทันที
+  autoGrow();
+  clearComposerMode();
 
   const now = Date.now();
   const msg = {
@@ -1223,7 +1542,7 @@ async function sendMessage(e) {
     text, ts: now, isMe: true, senderId: currentUser.id, kind: 'text',
     expiresAt: seconds ? now + seconds * 1000 : null,
     timer: seconds || null,
-    status: 'sending', readAt: null
+    status: 'sending', readAt: null, replyTo
   };
   addLocal(chat.id, msg);
   playSound('send');
@@ -1232,6 +1551,165 @@ async function sendMessage(e) {
   await deliverMessage(chat, msg);
 }
 
+// ช่องพิมพ์หลายบรรทัด: ขยายตามข้อความ เห็นข้อความทั้งหมด
+function autoGrow() {
+  const t = $('message-input');
+  t.style.height = 'auto';
+  t.style.height = Math.min(t.scrollHeight, 150) + 'px';
+}
+function onComposerInput() { autoGrow(); handleTyping(); }
+function toggleInputTools() { $('input-tools').classList.toggle('hidden-element'); $('tools-btn').classList.toggle('open'); }
+function comingSoon(name) { toast(`${name} จะเปิดให้ใช้ในเฟสถัดไป`, 'info'); }
+
+// ---------- ปักหมุดข้อความ ----------
+async function loadPins(chat) {
+  const token = ++pinsToken;
+  const me = currentUser.id;
+  let q = sb.from('messages').select('*').not('pinned_at', 'is', null)
+    .order('pinned_at', { ascending: false }).limit(5);
+  q = chat.isGroup
+    ? q.eq('group_id', chat.id)
+    : q.or(`and(sender_id.eq.${me},receiver_id.eq.${chat.id}),and(sender_id.eq.${chat.id},receiver_id.eq.${me})`);
+  const { data, error } = await q;
+  if (error || token !== pinsToken) return;
+  state.pins = state.pins || {};
+  state.pins[chat.id] = (data || []).map(toLocal);
+  if (activeChat && activeChat.id === chat.id) updatePinBar();
+}
+
+function updatePinBar() {
+  const bar = $('pin-bar');
+  const pins = activeChat ? ((state.pins && state.pins[activeChat.id]) || []) : [];
+  if (!pins.length) { bar.classList.add('hidden-element'); return; }
+  $('pin-bar-text').textContent = snippetOf(pins[0]);
+  $('pin-bar-count').textContent = pins.length > 1 ? `(${pins.length})` : '';
+  bar.classList.remove('hidden-element');
+}
+
+function openPins() {
+  if (!activeChat) return;
+  const pins = (state.pins && state.pins[activeChat.id]) || [];
+  const box = $('pins-list');
+  box.innerHTML = '';
+  if (!pins.length) box.appendChild(hintNode('ยังไม่มีข้อความที่ปักหมุด'));
+  pins.forEach(m => {
+    const card = document.createElement('div');
+    card.className = 'req-card';
+    const head = document.createElement('div');
+    head.className = 'hint';
+    head.style.marginTop = '0';
+    head.textContent = `${senderLabel(activeChat, m)} · ${dividerLabel(m.ts)}`;
+    const text = document.createElement('div');
+    text.className = 'pin-text';
+    text.textContent = m.text;
+    const acts = document.createElement('div');
+    acts.className = 'req-actions';
+    acts.appendChild(chip('ไปที่ข้อความ', () => { closeModal('pins-modal'); scrollToMessage(m.id); }, 'primary'));
+    if (canPin(m)) acts.appendChild(chip('เลิกปักหมุด', () => togglePin(m)));
+    card.append(head, text, acts);
+    box.appendChild(card);
+  });
+  openModal('pins-modal');
+}
+
+async function togglePin(m) {
+  const pin = !m.pinnedAt;
+  if (pin && m.expiresAt) return toast('ปักหมุดข้อความที่ตั้งเวลาลบไม่ได้', 'error');
+  const { error } = await sb.rpc('set_pin', { p_id: m.id, p_pin: pin });
+  if (error) return handleDbError(error);
+  toast(pin ? 'ปักหมุดข้อความแล้ว' : 'เลิกปักหมุดแล้ว', 'success');
+  if (!$('pins-modal').classList.contains('hidden-element')) closeModal('pins-modal');
+  // ตัวอัปเดตจริงมาจาก Realtime (onMessageUpdate) ถ้าไม่มา ให้โหลดใหม่
+  setTimeout(() => { if (activeChat) loadPins(activeChat); }, 800);
+}
+
+// อัปเดตข้อความจากเซิร์ฟเวอร์: อ่านแล้ว / แก้ไข / ปักหมุด
+function onMessageUpdate(row) {
+  if (!currentUser || !row || !row.id) return;
+  const me = currentUser.id;
+  const chatKey = row.group_id || (row.sender_id === me ? row.receiver_id : row.sender_id);
+  const m = (state.messages[chatKey] || []).find(x => x.id === row.id);
+  if (m) {
+    m.text = row.text;
+    m.readAt = row.read_at ? new Date(row.read_at).getTime() : null;
+    m.editedAt = row.edited_at ? new Date(row.edited_at).getTime() : null;
+    m.pinnedAt = row.pinned_at ? new Date(row.pinned_at).getTime() : null;
+  }
+  state.pins = state.pins || {};
+  const pins = (state.pins[chatKey] || []).filter(p => p.id !== row.id);
+  if (row.pinned_at) pins.push(toLocal(row));
+  pins.sort((a, b) => b.pinnedAt - a.pinnedAt);
+  state.pins[chatKey] = pins.slice(0, 5);
+  if (activeChat && activeChat.id === chatKey) {
+    updatePinBar();
+    if (m) loadMessages(true);
+  }
+}
+
+// ---------- แอบดูข้อความ (กดค้างที่แชทในหน้าหลัก 6 วินาที) ไม่ทำให้ขึ้นว่าอ่านแล้ว ----------
+function peekChat(chat) {
+  renderAvatar($('peek-avatar'), chat.avatar, nameOf(chat));
+  $('peek-avatar').classList.toggle('group-av', !!chat.isGroup);
+  $('peek-title').textContent = nameOf(chat);
+  const body = $('peek-body');
+  body.innerHTML = '';
+
+  const list = (state.messages[chat.id] || []).filter(m =>
+    !social.hidden.has(m.id) && !(chat.isGroup && !m.isMe && social.blocked.has(m.senderId)));
+  if (!list.length) body.appendChild(hintNode('ยังไม่มีข้อความ'));
+
+  let prev = null;
+  list.forEach(m => {
+    if (!prev || m.ts - prev.ts > 30 * 60 * 1000) {
+      const d = document.createElement('div');
+      d.className = 'date-divider';
+      d.textContent = dividerLabel(m.ts);
+      body.appendChild(d);
+    }
+    prev = m;
+    if (m.kind === 'system') {
+      const s = document.createElement('div');
+      s.className = 'system-msg';
+      s.textContent = m.text;
+      body.appendChild(s);
+      return;
+    }
+    const row = document.createElement('div');
+    row.className = 'peek-msg' + (m.isMe ? ' me' : '');
+    if (chat.isGroup && !m.isMe) {
+      const who = document.createElement('span');
+      who.className = 'msg-sender';
+      who.textContent = groupSenderName(chat, m.senderId);
+      who.style.color = `hsl(${hueOf(m.senderId)} 65% 62%)`;
+      row.appendChild(who);
+    }
+    const t = document.createElement('span');
+    t.textContent = m.text;
+    row.appendChild(t);
+    body.appendChild(row);
+  });
+  openModal('peek-modal'); // ไม่เรียก markRead / mark_read
+  body.scrollTop = body.scrollHeight;
+}
+
+// ---------- ใช้งานล่าสุด ----------
+function touchLastSeen() {
+  if (!currentUser || document.hidden || !sb) return;
+  sb.rpc('touch_last_seen').then(() => {}, () => {});
+}
+
+async function refreshLastSeen(chat) {
+  if (!chat || chat.isGroup) return;
+  const { data } = await sb.from('public_profiles').select('id, last_seen_at').eq('id', chat.id).maybeSingle();
+  if (data && state.contacts[chat.id]) {
+    state.contacts[chat.id].last_seen_at = data.last_seen_at;
+    if (activeChat && activeChat.id === chat.id) updateHeaderStatus();
+  }
+}
+
+// ==================== เฟส C: ความเสถียรของแชท ====================
+
+// ---------- ส่งข้อความ: แสดงทันที + สถานะ กำลังส่ง/ส่งแล้ว/ส่งไม่สำเร็จ (กดส่งใหม่ได้) ----------
 async function deliverMessage(chat, msg) {
   if (msg.status !== 'sending') {
     msg.status = 'sending';
@@ -1241,6 +1719,7 @@ async function deliverMessage(chat, msg) {
     sender_id: currentUser.id,
     ...(chat.isGroup ? { group_id: chat.id } : { receiver_id: chat.id }),
     text: msg.text,
+    reply_to: msg.replyTo || null,
     expires_at: msg.expiresAt ? new Date(msg.expiresAt).toISOString() : null
   }).select().single();
 
@@ -1273,17 +1752,6 @@ async function deleteMessage(msgId) {
 }
 
 // ---------- สถานะอ่านแล้ว ----------
-function onMessageUpdate(row) {
-  if (!currentUser || !row || !row.id) return;
-  for (const chatId in state.messages) {
-    const m = state.messages[chatId].find(x => x.id === row.id);
-    if (!m) continue;
-    m.readAt = row.read_at ? new Date(row.read_at).getTime() : null;
-    if (activeChat && activeChat.id === chatId) loadMessages(true);
-    return;
-  }
-}
-
 // ---------- โหลดประวัติย้อนหลังเป็นหน้าๆ ----------
 function isHistoryDone(id) {
   return !!(state.historyAll || (state.history && state.history[id] && state.history[id].done));
@@ -1737,6 +2205,29 @@ function setupGlobalListeners() {
   $('messages-container').addEventListener('scroll', onMessagesScroll, { passive: true });
   // ปิดการซูมด้วยการบีบนิ้วบน iOS (การแตะสองครั้งปิดด้วย CSS touch-action)
   ['gesturestart', 'gesturechange', 'gestureend'].forEach(t => document.addEventListener(t, e => e.preventDefault()));
+
+  // คอมพิวเตอร์: Enter = ส่ง, Shift+Enter = ขึ้นบรรทัดใหม่ / มือถือ: Enter = ขึ้นบรรทัดใหม่ ส่งด้วยปุ่มลูกศร
+  $('message-input').addEventListener('keydown', e => {
+    if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && window.matchMedia('(pointer: fine)').matches) {
+      e.preventDefault();
+      $('send-btn').click();
+    }
+  });
+
+  // ออกจากห้องแชทแบบง่าย: ปัดขวาที่หัวห้อง หรือปัดจากขอบซ้ายของจอ
+  const area = $('chat-area');
+  let backSwipe = null;
+  area.addEventListener('pointerdown', e => {
+    const r = area.getBoundingClientRect();
+    backSwipe = (e.clientX - r.left < 26 || e.target.closest('.chat-header')) ? { x: e.clientX, y: e.clientY } : null;
+  });
+  area.addEventListener('pointerup', e => {
+    if (!backSwipe) return;
+    const dx = e.clientX - backSwipe.x, dy = Math.abs(e.clientY - backSwipe.y);
+    backSwipe = null;
+    if (dx > 80 && dy < 50 && activeChat) backToList();
+  });
+  area.addEventListener('pointercancel', () => { backSwipe = null; });
   document.addEventListener('keydown', e => {
     if (pinIsOpen()) {
       if (/^\d$/.test(e.key)) pinPress(e.key);
@@ -1745,7 +2236,10 @@ function setupGlobalListeners() {
     }
     if (e.key === 'Escape') {
       if (!$('confirm-modal').classList.contains('hidden-element')) return answerConfirm(false);
-      document.querySelectorAll('.modal:not(#recovery-modal)').forEach(m => m.classList.add('hidden-element'));
+      const openModals = document.querySelectorAll('.modal:not(.hidden-element):not(#recovery-modal)');
+      if (openModals.length) { openModals.forEach(m => m.classList.add('hidden-element')); return; }
+      if (composer.type) return clearComposerMode();
+      if (activeChat) backToList();
     }
   });
 
@@ -1757,6 +2251,7 @@ function setupGlobalListeners() {
   // กลับมาเปิดแอปหลังซ่อนนานเกินกำหนด ต้องใส่ PIN อีกครั้ง
   document.addEventListener('visibilitychange', () => {
     if (document.hidden) { hiddenAt = Date.now(); return; }
+    touchLastSeen();
     if (currentUser && hiddenAt && Date.now() - hiddenAt > PIN_LOCK_AFTER_MS &&
         hasPin(currentUser.id) && !pinIsOpen()) {
       showPin('unlock', currentUser, () => { if (activeChat) markRead(activeChat.id); });
@@ -1773,24 +2268,26 @@ let openSwipe = null;
 let friendsToken = 0;
 
 function emptySocial() {
-  return { friendships: [], blocked: new Set(), muted: new Set(), cleared: {}, profiles: {} };
+  return { friendships: [], blocked: new Set(), muted: new Set(), hidden: new Set(), cleared: {}, profiles: {} };
 }
 
 const FRIEND_COLS = 'id, requester_id, addressee_id, status, created_at';
-const PROFILE_COLS = 'id, nickname, username, avatar, email, search_id';
+const PROFILE_COLS = 'id, nickname, username, avatar, email, search_id, last_seen_at';
 
 async function loadSocial() {
-  const [fr, bl, mu, cl] = await Promise.all([
+  const [fr, bl, mu, cl, hd] = await Promise.all([
     sb.from('friendships').select(FRIEND_COLS),
     sb.from('blocks').select('blocked_id'),
     sb.from('chat_mutes').select('partner_id'),
-    sb.from('chat_clears').select('partner_id, cleared_at')
+    sb.from('chat_clears').select('partner_id, cleared_at'),
+    sb.from('hidden_messages').select('message_id').limit(5000)
   ]);
-  const err = fr.error || bl.error || mu.error || cl.error;
+  const err = fr.error || bl.error || mu.error || cl.error || hd.error;
   if (err) throw err;
   social.friendships = fr.data || [];
   social.blocked = new Set((bl.data || []).map(r => r.blocked_id));
   social.muted = new Set((mu.data || []).map(r => r.partner_id));
+  social.hidden = new Set((hd.data || []).map(r => r.message_id));
   social.cleared = {};
   (cl.data || []).forEach(r => { social.cleared[r.partner_id] = new Date(r.cleared_at).getTime(); });
 }
@@ -2081,6 +2578,11 @@ async function openUserProfile(id) {
     const v = document.createElement('span');
     if (value) v.textContent = value; else { v.textContent = 'ผู้ใช้ปิดการแสดง'; v.className = 'off'; }
     row.append(l, v);
+    if (label === 'ID' && value) {
+      const cp = chip('คัดลอก', () => copyText(data.search_id));
+      cp.style.marginLeft = '8px';
+      row.appendChild(cp);
+    }
     box.appendChild(row);
   });
 
@@ -2297,48 +2799,62 @@ async function clearChat(id) {
 }
 
 function closeSwipe() {
-  if (openSwipe) { openSwipe.style.transform = ''; openSwipe.classList.remove('swiped'); openSwipe = null; }
+  if (openSwipe) { openSwipe.style.transform = ''; openSwipe.classList.remove('swiped', 'right'); openSwipe = null; }
 }
 
 // ปัดรายการแชทไปทางซ้ายเพื่อเผยปุ่ม "ลบ" (รองรับทั้งนิ้วและเมาส์)
-function attachSwipe(item, delBtn, onTap, onDelete) {
-  let startX = 0, startY = 0, dx = 0, dragging = false, moved = false;
+function attachSwipe(item, delBtn, profBtn, onTap, onDelete, onProfile, onPeek) {
+  let startX = 0, startY = 0, dx = 0, dragging = false, moved = false, peeked = false, peekTimer = null;
+  const offset = () => (item === openSwipe ? (item.classList.contains('right') ? 88 : -88) : 0);
 
+  item.addEventListener('contextmenu', e => e.preventDefault());
   item.addEventListener('pointerdown', e => {
     if (e.button) return;
-    startX = e.clientX; startY = e.clientY; dx = 0; dragging = true; moved = false;
+    startX = e.clientX; startY = e.clientY; dx = 0; dragging = true; moved = false; peeked = false;
     if (openSwipe && openSwipe !== item) closeSwipe();
+    // ฟังก์ชันลับ: กดค้าง 6 วินาทีเพื่อแอบดูข้อความโดยไม่ขึ้นว่าอ่านแล้ว (ไม่มีสัญลักษณ์บอก)
+    clearTimeout(peekTimer);
+    peekTimer = setTimeout(() => {
+      if (dragging && !moved) { peeked = true; dragging = false; onPeek(); }
+    }, 6000);
   });
   item.addEventListener('pointermove', e => {
     if (!dragging) return;
     const x = e.clientX - startX, y = e.clientY - startY;
     if (!moved && Math.abs(x) > 8 && Math.abs(x) > Math.abs(y)) {
       moved = true;
+      clearTimeout(peekTimer);
       item.setPointerCapture(e.pointerId);
       item.style.transition = 'none';
+    } else if (!moved && Math.abs(y) > 10) {
+      clearTimeout(peekTimer);
     }
     if (moved) {
-      const base = item === openSwipe ? -88 : 0;
-      dx = Math.max(-110, Math.min(0, base + x));
+      dx = Math.max(-110, Math.min(110, offset() + x));
       item.style.transform = `translateX(${dx}px)`;
     }
   });
   const end = () => {
+    clearTimeout(peekTimer);
     if (!dragging) return;
     dragging = false;
     item.style.transition = '';
     if (!moved) return;
+    item.classList.remove('right', 'swiped');
     if (dx < -44) { item.style.transform = 'translateX(-88px)'; item.classList.add('swiped'); openSwipe = item; }
-    else { item.style.transform = ''; item.classList.remove('swiped'); if (openSwipe === item) openSwipe = null; }
+    else if (dx > 44) { item.style.transform = 'translateX(88px)'; item.classList.add('swiped', 'right'); openSwipe = item; }
+    else { item.style.transform = ''; if (openSwipe === item) openSwipe = null; }
   };
   item.addEventListener('pointerup', end);
   item.addEventListener('pointercancel', end);
   item.addEventListener('click', e => {
+    if (peeked) { peeked = false; e.preventDefault(); return; }
     if (moved) { moved = false; e.preventDefault(); return; }
     if (openSwipe === item) { closeSwipe(); return; }
     onTap();
   });
   delBtn.onclick = () => { closeSwipe(); onDelete(); };
+  profBtn.onclick = () => { closeSwipe(); onProfile(); };
 }
 
 // ==================== แชทกลุ่ม (เฟส B2) ====================
