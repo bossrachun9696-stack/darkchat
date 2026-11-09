@@ -58,6 +58,11 @@ function thaiError(error) {
   if (/rate limit/i.test(msg)) return 'ทำรายการบ่อยเกินไป กรุณารอสักครู่';
   if (/should be different|same as the old/i.test(msg)) return 'รหัสผ่านใหม่ต้องไม่ซ้ำกับรหัสเดิม';
   if (/too_many_new_chats/i.test(msg)) return 'เริ่มแชทกับคนใหม่ได้ไม่เกิน 20 คนต่อวัน';
+  if (/secret_no_key_partner/i.test(msg)) return 'เพื่อนยังไม่ได้เปิดแอปเวอร์ชันใหม่ จึงยังเปิดห้องลับไม่ได้ (ให้เพื่อนเปิดแอปเวอร์ชันล่าสุดก่อน)';
+  if (/secret_no_key_me/i.test(msg)) return 'เครื่องนี้ยังไม่มีกุญแจเข้ารหัส ปิดแล้วเปิดแอปใหม่อีกครั้ง';
+  if (/secret_required/i.test(msg)) return 'ห้องลับต้องส่งแบบเข้ารหัสเท่านั้น (ลองเปิดแอปใหม่)';
+  if (/secret_no_edit/i.test(msg)) return 'แก้ไขข้อความในห้องลับไม่ได้';
+  if (/secret_no_cards|secret_no_schedule/i.test(msg)) return 'ห้องลับยังใช้ฟีเจอร์นี้ไม่ได้ (โพลล์ นัดหมาย ตำแหน่ง ตั้งเวลาส่ง)';
   if (/call_full/i.test(msg)) return 'สายนี้เต็มแล้ว (สูงสุด 6 คน)';
   if (/call_ended/i.test(msg)) return 'สายนี้สิ้นสุดแล้ว';
   if (/invalid_live/i.test(msg)) return 'ระยะเวลาแชร์ตำแหน่งสดไม่ถูกต้อง';
@@ -162,6 +167,8 @@ async function enterApp(user) {
     resumeLiveShares();
     hydrateRoomPrefs();
     registerThisDevice();
+    e2eeInit();
+    loadSecretRooms().then(() => loadChatList());
     checkRingingCalls();
     await loadSocial();
     await loadGroups();
@@ -599,6 +606,9 @@ function toLocal(row) {
     batch: (row.meta && row.meta.batch) || null,
     rmeta: row.meta || null,
     sticker: (row.meta && row.meta.sticker) || null,
+    enc: row.enc || null,
+    encFrom: row.sender_id,
+    encTo: row.receiver_id,
     batchN: (row.meta && row.meta.n) || null,
     timer: row.ttl_seconds || (exp ? Math.round((exp - ts) / 1000) : null)
   };
@@ -610,6 +620,7 @@ function addLocal(partnerId, msg) {
   if (list.some(m => m.id === msg.id)) return false;
   list.push(msg);
   list.sort((a, b) => a.ts - b.ts);
+  if (msg.enc && !msg.dec) queueDecrypt(partnerId, msg);
   if (typeof watchChatUpdated === 'function') watchChatUpdated(partnerId, msg);
   return true;
 }
@@ -748,7 +759,8 @@ const RT_EXTRAS = [
   { table: 'devices', events: [['UPDATE', p => onDeviceChange(p)]] },
   { table: 'calls', events: [['*', p => onCallChange(p)]] },
   { table: 'call_streams', events: [['INSERT', p => onStreamChange(p)], ['DELETE', p => onStreamChange(p)]] },
-  { table: 'message_reactions', events: [['*', p => onReactionChange(p)]] }
+  { table: 'message_reactions', events: [['*', p => onReactionChange(p)]] },
+  { table: 'secret_rooms', events: [['*', p => onSecretChange(p)]] }
 ];
 
 function onCoreStatus(status, gen) {
@@ -1110,7 +1122,7 @@ function loadChatList(filtered = null) {
     top.className = 'chat-item-top';
     const name = document.createElement('span');
     name.className = 'chat-name';
-    name.textContent = nameOf(chat) + (social.pinnedChats.has(chat.id) ? ' 📌' : '');
+    name.textContent = nameOf(chat) + (social.pinnedChats.has(chat.id) ? ' 📌' : '') + (isSecret(chat.id) ? ' 🔒' : '');
     if (chat.isGroup) {
       const tag = document.createElement('span');
       tag.className = 'tag-group';
@@ -1272,6 +1284,7 @@ function startChatWith(profile) {
 // ==================== หน้าแชท ====================
 function resetChatView() {
   updateCallBanner();
+  applySecretUI(null);
   $('plus-btn').disabled = true;
   $('sticker-btn').disabled = true;
   closeStickerPanel();
@@ -1334,7 +1347,7 @@ function selectChat(chat) {
 
   $('message-input').disabled = false;
   $('send-btn').disabled = false;
-  $('message-input').placeholder = `พิมพ์ข้อความถึง ${nameOf(activeChat)}`;
+  $('message-input').placeholder = composerPlaceholder();
 
   $('main-section').classList.add('chat-open');
   loadMessages();
@@ -1356,6 +1369,7 @@ function selectChat(chat) {
   loadCards(activeChat);
   loadLive(activeChat);
   loadOpenCall(activeChat);
+  applySecretUI(activeChat);
   loadReactions(activeChat);
   refreshLastSeen(activeChat);
   if (window.matchMedia('(min-width: 761px)').matches) $('message-input').focus();
@@ -1746,6 +1760,8 @@ function openMsgMenu(msg) {
   if (msgCanEdit(msg)) add('แก้ไข', () => startEdit(msg));
   if (canPin(msg)) add(msg.pinnedAt ? 'เลิกปักหมุด' : 'ปักหมุด', () => togglePin(msg));
   add('ลบ', () => enterSelectMode([msg.id]), 'secondary-btn danger');
+  // ห้องลับ: ไม่ให้ส่งต่อ/เตือน/บันทึกลงแชทตัวเอง/แก้ไข/ปักหมุด เพราะจะทำให้เนื้อหาขึ้นไปอยู่บนเซิร์ฟเวอร์แบบอ่านออก
+  if (isSecret(activeChat.id)) [...box.children].forEach(b => { if (/^(แก้ไข|ส่งต่อ|ปักหมุด|เลิกปักหมุด|เตือนฉัน|บันทึกข้อความ)$/.test(b.textContent.trim())) b.remove(); });
   box.appendChild(actionBtn('ปิด', () => closeModal('msg-menu')));
   openModal('msg-menu');
 }
@@ -1884,10 +1900,16 @@ function autoGrow() {
   syncSendMic();
 }
 function onComposerInput() { autoGrow(); handleTyping(); scheduleDraftSave(); }
+function composerPlaceholder() {
+  return isSecret(activeChat.id) && !activeChat.isGroup && !activeChat.isSaved
+    ? `พิมพ์ข้อความลับถึง ${nameOf(activeChat)}` : `พิมพ์ข้อความถึง ${nameOf(activeChat)}`;
+}
+
 function comingSoon(name) { toast(`${name} จะเปิดให้ใช้ในเฟสถัดไป`, 'info'); }
 
 // ---------- ปักหมุดข้อความ ----------
 async function loadPins(chat) {
+  if (isSecret(chat.id)) { state.pins = state.pins || {}; state.pins[chat.id] = []; if (activeChat && activeChat.id === chat.id) updatePinBar(); return; }
   const token = ++pinsToken;
   const me = currentUser.id;
   let q = sb.from('messages').select('*').not('pinned_at', 'is', null)
@@ -1955,7 +1977,7 @@ function onMessageUpdate(row) {
   const chatKey = row.group_id || (row.sender_id === me ? row.receiver_id : row.sender_id);
   const m = (state.messages[chatKey] || []).find(x => x.id === row.id);
   if (m) {
-    m.text = row.text;
+    if (!m.enc) m.text = row.text;   // ข้อความเข้ารหัส: ห้ามเขียนทับด้วยข้อความแทนจากเซิร์ฟเวอร์
     m.readAt = row.read_at ? new Date(row.read_at).getTime() : null;
     m.editedAt = row.edited_at ? new Date(row.edited_at).getTime() : null;
     m.pinnedAt = row.pinned_at ? new Date(row.pinned_at).getTime() : null;
@@ -2302,6 +2324,14 @@ function openRoomMenu() {
   } else {
     add('ตั้งรหัสล็อกห้องนี้', () => setRoomCode(c));
   }
+  if (!c.isGroup && !c.isSaved) {
+    if (isSecret(c.id)) {
+      add('รหัสความปลอดภัย (ห้องลับ)', openSafety);
+      add('ปิดห้องลับ', disableSecretRoom, 'secondary-btn danger');
+    } else add('เปิดห้องลับ (เข้ารหัสปลายทาง)', enableSecretRoom);
+  }
+  // ห้องลับ: ฟีเจอร์ที่ต้องเก็บเนื้อหาไว้ที่เซิร์ฟเวอร์ใช้ไม่ได้
+  if (isSecret(c.id)) [...box.children].forEach(b => { if (/ข้อความที่ปักหมุด|สื่อของห้อง|เตือนและข้อความตั้งเวลา/.test(b.textContent)) b.remove(); });
   box.appendChild(actionBtn('ปิด', () => closeModal('room-menu')));
   openModal('room-menu');
 }
@@ -2353,6 +2383,7 @@ async function runMsgSearch() {
   const q = raw.replace(/[%_\\,()]/g, '');
   const box = $('smsg-list');
   if (q.length < 2) { box.innerHTML = ''; box.appendChild(hintNode('พิมพ์อย่างน้อย 2 ตัวอักษร')); return; }
+  if (!chat.isGroup && isSecret(chat.id)) return runSecretSearch(q);
 
   const token = ++smsgToken;
   const me = currentUser.id;
@@ -5266,6 +5297,7 @@ async function forceSignOut() {
   const uid = currentUser.id;
   const key = deviceKey();
   try { await sb.from('devices').delete().eq('device_key', key); } catch (e) { /* ไม่เป็นไร */ }
+  try { await sb.from('e2ee_keys').update({ revoked_at: new Date().toISOString() }).eq('device_key', key); } catch (e) { /* ไม่เป็นไร */ }
   try { localStorage.removeItem('darkchat_device_key'); } catch (e) { /* ไม่เป็นไร */ }
   toast('บัญชีนี้ถูกสั่งออกจากระบบจากอีกเครื่อง', 'error');
   await logoutNow(uid);
@@ -5334,6 +5366,7 @@ async function revokeDevice(d) {
   if (!ok) return;
   const { error } = await sb.from('devices').update({ revoked_at: new Date().toISOString() }).eq('id', d.id);
   if (error) return handleDbError(error);
+  await sb.from('e2ee_keys').update({ revoked_at: new Date().toISOString() }).eq('device_key', d.device_key);
   toast('สั่งออกจากระบบแล้ว', 'success');
   renderDevices();
 }
@@ -5344,6 +5377,7 @@ async function signOutOthers() {
   if (!ok) return;
   // 1) ตั้งธงให้เครื่องอื่นออกจากระบบทันที  2) ยกเลิกสิทธิ์การเข้าถึงของเครื่องอื่นที่ฝั่งเซิร์ฟเวอร์
   await sb.from('devices').update({ revoked_at: new Date().toISOString() }).neq('device_key', deviceKey()).is('revoked_at', null);
+  await sb.from('e2ee_keys').update({ revoked_at: new Date().toISOString() }).neq('device_key', deviceKey()).is('revoked_at', null);
   const { error } = await sb.auth.signOut({ scope: 'others' });
   if (error) return handleDbError(error);
   toast('ออกจากระบบทุกเครื่องอื่นแล้ว', 'success');
@@ -6561,6 +6595,306 @@ function joinOpenCall() {
   if (row) joinCall(row.id, c, row.kind);
 }
 
+// ==================== เฟส F1: ห้องลับ (เข้ารหัสข้อความปลายทาง 1 ต่อ 1) ====================
+// หลักการ: ทุกเครื่องมีคู่กุญแจ ECDH P-256 (กุญแจส่วนตัวเก็บใน IndexedDB แบบดึงออกไม่ได้ ไม่เคยขึ้นเซิร์ฟเวอร์)
+// ข้อความแต่ละก้อนเข้ารหัสด้วยกุญแจสุ่ม AES-256-GCM แล้วห่อกุญแจนั้นให้ "ทุกเครื่อง" ของทั้งสองฝ่าย (ECDH + HKDF + AES-GCM)
+const SECRET_TEXT = '🔒 ข้อความที่เข้ารหัส';
+const ECDH_ALG = { name: 'ECDH', namedCurve: 'P-256' };
+const E2EE = { ready: null, priv: null, keyId: null, cache: {}, pending: [], queued: false };
+
+const enc8 = s => new TextEncoder().encode(s);
+const dec8 = b => new TextDecoder().decode(b);
+
+function b64e(buf) {
+  const a = new Uint8Array(buf);
+  let s = '';
+  for (let i = 0; i < a.length; i += 0x8000) s += String.fromCharCode.apply(null, a.subarray(i, i + 0x8000));
+  return btoa(s);
+}
+
+function b64d(str) {
+  const s = atob(str);
+  const a = new Uint8Array(s.length);
+  for (let i = 0; i < s.length; i++) a[i] = s.charCodeAt(i);
+  return a;
+}
+
+async function deriveWrapKey(privKey, pubKey, info) {
+  const bits = await crypto.subtle.deriveBits({ name: 'ECDH', public: pubKey }, privKey, 256);
+  const base = await crypto.subtle.importKey('raw', bits, 'HKDF', false, ['deriveKey']);
+  return crypto.subtle.deriveKey(
+    { name: 'HKDF', hash: 'SHA-256', salt: enc8('darkchat-e2ee-salt-v1'), info: enc8(info) },
+    base, { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
+}
+
+// เข้ารหัสข้อความ plain (ออบเจกต์) ให้ทุกเครื่องใน recipients ([{ device_key, pub }])
+async function e2eeEncrypt(plain, senderId, partnerId, recipients) {
+  const cek = await crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, true, ['encrypt']);
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv, additionalData: enc8(`${senderId}|${partnerId}`) }, cek, enc8(JSON.stringify(plain)));
+  const raw = await crypto.subtle.exportKey('raw', cek);
+  const k = [];
+  for (const r of recipients) {
+    const pub = await crypto.subtle.importKey('jwk', r.pub, ECDH_ALG, true, []);
+    const eph = await crypto.subtle.generateKey(ECDH_ALG, true, ['deriveBits']);   // กุญแจชั่วคราวใช้ครั้งเดียวต่อข้อความต่อเครื่อง
+    const wk = await deriveWrapKey(eph.privateKey, pub, 'wrap:' + r.device_key);
+    const wiv = crypto.getRandomValues(new Uint8Array(12));
+    const w = await crypto.subtle.encrypt({ name: 'AES-GCM', iv: wiv, additionalData: enc8(r.device_key) }, wk, raw);
+    const ep = await crypto.subtle.exportKey('jwk', eph.publicKey);
+    k.push({ d: r.device_key, e: { x: ep.x, y: ep.y }, i: b64e(wiv), w: b64e(w) });
+  }
+  return { v: 1, i: b64e(iv), c: b64e(ct), k };
+}
+
+async function e2eeDecrypt(encObj, privKey, myDeviceKey, senderId, partnerId) {
+  const entry = (encObj.k || []).find(x => x.d === myDeviceKey);
+  if (!entry) throw new Error('no_entry');   // ข้อความนี้ส่งก่อนที่เครื่องนี้จะลงทะเบียนกุญแจ
+  const eph = await crypto.subtle.importKey('jwk', { kty: 'EC', crv: 'P-256', x: entry.e.x, y: entry.e.y, ext: true }, ECDH_ALG, true, []);
+  const wk = await deriveWrapKey(privKey, eph, 'wrap:' + myDeviceKey);
+  const raw = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: b64d(entry.i), additionalData: enc8(myDeviceKey) }, wk, b64d(entry.w));
+  const cek = await crypto.subtle.importKey('raw', raw, 'AES-GCM', false, ['decrypt']);
+  const pt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: b64d(encObj.i), additionalData: enc8(`${senderId}|${partnerId}`) }, cek, b64d(encObj.c));
+  return JSON.parse(dec8(pt));
+}
+
+// รหัสความปลอดภัย (ใช้เทียบกับเพื่อนว่าตรงกัน ป้องกันการสวมกุญแจกลางทาง) = แฮชของกุญแจสาธารณะทุกเครื่องของสองฝ่าย
+async function safetyCodeFor(meId, myKeys, partnerId, partnerKeys) {
+  const part = (id, keys) => `${id}:` + keys.map(k => `${k.pub.x}.${k.pub.y}`).sort().join(',');
+  const sides = [[meId, myKeys], [partnerId, partnerKeys]].sort((a, b) => (a[0] < b[0] ? -1 : 1));
+  const h = new Uint8Array(await crypto.subtle.digest('SHA-256', enc8(sides.map(([id, ks]) => part(id, ks)).join('|'))));
+  const groups = [];
+  for (let i = 0; i < 12; i++) groups.push(String(((h[2 * i] << 8) | h[2 * i + 1]) % 100000).padStart(5, '0'));
+  return groups.join(' ');
+}
+
+// ---------- กุญแจของเครื่องนี้ (เก็บใน IndexedDB) ----------
+function idbOpen() {
+  return new Promise((resolve, reject) => {
+    const r = indexedDB.open('darkchat-e2ee', 1);
+    r.onupgradeneeded = () => r.result.createObjectStore('keys');
+    r.onsuccess = () => resolve(r.result);
+    r.onerror = () => reject(r.error);
+  });
+}
+
+async function idbGet(key) {
+  const db = await idbOpen();
+  return new Promise((resolve, reject) => {
+    const q = db.transaction('keys').objectStore('keys').get(key);
+    q.onsuccess = () => resolve(q.result);
+    q.onerror = () => reject(q.error);
+  });
+}
+
+async function idbSet(key, val) {
+  const db = await idbOpen();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction('keys', 'readwrite');
+    tx.objectStore('keys').put(val, key);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+function e2eeInit() {
+  if (E2EE.ready) return E2EE.ready;
+  E2EE.ready = (async () => {
+    if (!window.crypto || !crypto.subtle || !window.indexedDB) throw new Error('unsupported');
+    const kk = 'kp:' + currentUser.id;
+    let kp = await idbGet(kk);
+    if (!kp) { kp = await crypto.subtle.generateKey(ECDH_ALG, false, ['deriveBits']); await idbSet(kk, kp); }
+    E2EE.priv = kp.privateKey;
+    E2EE.keyId = deviceKey();
+    const jwk = await crypto.subtle.exportKey('jwk', kp.publicKey);
+    const { error } = await sb.rpc('register_e2ee_key', { p_device_key: E2EE.keyId, p_pub: { kty: jwk.kty, crv: jwk.crv, x: jwk.x, y: jwk.y } });
+    if (error) throw error;
+    return true;
+  })().catch(e => { console.warn('e2ee init', e); E2EE.ready = null; return false; });
+  return E2EE.ready;
+}
+
+async function fetchKeys(uid, force) {
+  const c = E2EE.cache[uid];
+  if (!force && c && c.exp > Date.now()) return c.keys;
+  const { data, error } = await sb.from('e2ee_keys').select('device_key, pub').eq('user_id', uid).is('revoked_at', null);
+  if (error) throw error;
+  E2EE.cache[uid] = { keys: data || [], exp: Date.now() + 15000 };
+  return E2EE.cache[uid].keys;
+}
+
+async function encryptPayload(partnerId, plain) {
+  if (!(await e2eeInit())) throw new Error('unsupported');
+  const me = currentUser.id;
+  let mine = await fetchKeys(me);
+  if (!mine.some(k => k.device_key === E2EE.keyId)) mine = await fetchKeys(me, true);
+  const theirs = await fetchKeys(partnerId);
+  if (!theirs.length) throw new Error('no_partner_key');
+  return e2eeEncrypt(plain, me, partnerId, [...mine, ...theirs]);   // ผู้รับ + ทุกเครื่องของเราเอง (เครื่องอื่นของเราจะได้อ่านได้ด้วย)
+}
+
+async function decryptMsg(m) {
+  try {
+    if (!(await e2eeInit())) throw new Error('not ready');
+    const obj = await e2eeDecrypt(m.enc, E2EE.priv, E2EE.keyId, m.encFrom, m.encTo);
+    m.text = typeof obj.t === 'string' ? obj.t : '';
+    m.sticker = obj.s || null;
+    m.dec = true;
+  } catch (e) {
+    m.text = '🔒 ถอดรหัสไม่ได้ (ข้อความนี้ส่งก่อนที่เครื่องนี้จะเข้าร่วม หรือกุญแจเปลี่ยน)';
+    m.decFail = true;
+    m.dec = true;
+  }
+}
+
+// ถอดรหัสแบบไม่บล็อกหน้าจอ แล้ววาดใหม่ครั้งเดียว
+function queueDecrypt(chatId, msg) {
+  E2EE.pending.push([chatId, msg]);
+  if (E2EE.queued) return;
+  E2EE.queued = true;
+  setTimeout(async () => {
+    E2EE.queued = false;
+    const list = E2EE.pending.splice(0);
+    await Promise.all(list.map(([, m]) => decryptMsg(m)));
+    const touched = new Set(list.map(x => x[0]));
+    if (activeChat && touched.has(activeChat.id)) loadMessages(true);
+    loadChatList();
+  }, 0);
+}
+
+// ---------- สถานะห้องลับ ----------
+function isSecret(chatId) { return !!(state.secret && state.secret.has(chatId)); }
+
+async function loadSecretRooms() {
+  const { data, error } = await sb.from('secret_rooms').select('a, b');
+  if (error) return;   // ยังไม่ได้รัน SQL ของรอบนี้
+  const me = currentUser.id;
+  state.secret = new Set((data || []).map(r => (r.a === me ? r.b : r.a)));
+}
+
+function onSecretChange() {
+  loadSecretRooms().then(() => {
+    loadChatList();
+    if (activeChat) { applySecretUI(activeChat); loadMessages(true); }
+  });
+}
+
+function verifiedKey() { return 'darkchat_e2ee_verified_' + currentUser.id; }
+function getVerified() { try { return JSON.parse(localStorage.getItem(verifiedKey()) || '{}'); } catch (e) { return {}; } }
+
+async function currentSafetyCode(chat) {
+  const me = currentUser.id;
+  const [mine, theirs] = await Promise.all([fetchKeys(me, true), fetchKeys(chat.id, true)]);
+  return safetyCodeFor(me, mine, chat.id, theirs);
+}
+
+async function updateSecretBanner(chat) {
+  const txt = $('secret-banner-text');
+  txt.textContent = '🔒 ห้องลับ · เข้ารหัสปลายทาง';
+  try {
+    const code = await currentSafetyCode(chat);
+    if (!activeChat || activeChat.id !== chat.id) return;
+    const verified = getVerified()[chat.id];
+    if (!verified) txt.textContent = '🔒 ห้องลับ · ยังไม่ได้ตรวจรหัสความปลอดภัย';
+    else if (verified !== code) txt.textContent = '⚠️ ห้องลับ · รหัสความปลอดภัยเปลี่ยน (อาจเป็นเครื่องใหม่ของเพื่อน) ตรวจอีกครั้ง';
+  } catch (e) { /* ไม่เป็นไร */ }
+}
+
+function applySecretUI(chat) {
+  const sec = !!chat && !chat.isGroup && !chat.isSaved && isSecret(chat.id);
+  $('chat-area').classList.toggle('secret-mode', sec);
+  $('secret-banner').classList.toggle('hidden-element', !sec);
+  if (sec) {
+    $('message-input').placeholder = `พิมพ์ข้อความลับถึง ${nameOf(chat)}`;
+    updateSecretBanner(chat);
+  }
+}
+
+async function openSafety() {
+  const c = activeChat;
+  if (!c || !isSecret(c.id)) return;
+  $('safety-code').textContent = 'กำลังคำนวณ…';
+  $('safety-name').textContent = nameOf(c);
+  openModal('safety-modal');
+  try {
+    const code = await currentSafetyCode(c);
+    $('safety-code').textContent = code;
+    $('safety-verified').classList.toggle('hidden-element', getVerified()[c.id] !== code);
+  } catch (e) { $('safety-code').textContent = 'คำนวณไม่ได้ ลองใหม่อีกครั้ง'; }
+}
+
+function markSafetyVerified() {
+  const c = activeChat;
+  const code = $('safety-code').textContent;
+  if (!c || !/^\d{5}( \d{5}){11}$/.test(code)) return;
+  const all = getVerified();
+  all[c.id] = code;
+  try { localStorage.setItem(verifiedKey(), JSON.stringify(all)); } catch (e) { /* ไม่เป็นไร */ }
+  closeModal('safety-modal');
+  toast('บันทึกแล้วว่าตรวจรหัสความปลอดภัยกับเพื่อนแล้ว', 'success');
+  updateSecretBanner(c);
+}
+
+async function enableSecretRoom() {
+  const c = activeChat;
+  if (!c || c.isGroup || c.isSaved) return;
+  const ok = await confirmDialog('เปิดห้องลับ',
+    'ข้อความที่ส่งหลังจากนี้ในห้องนี้จะเข้ารหัสปลายทาง เซิร์ฟเวอร์และเจ้าของระบบอ่านเนื้อหาไม่ได้\n\n' +
+    'ข้อจำกัดของรอบนี้: ส่งได้เฉพาะข้อความและสติ๊กเกอร์ (ยังส่งรูป ไฟล์ เสียง การ์ด และตั้งเวลาส่งไม่ได้) แก้ไข/ปักหมุด/ส่งต่อข้อความไม่ได้ และข้อความเก่าก่อนเปิดห้องลับยังไม่เข้ารหัส\n\n' +
+    'ถ้าล้างข้อมูลเบราว์เซอร์หรือเปลี่ยนเครื่อง จะอ่านข้อความลับเก่าบนเครื่องนั้นไม่ได้ (กู้คืนไม่ได้)', 'เปิดห้องลับ');
+  if (!ok) return;
+  if (!(await e2eeInit())) return toast('เบราว์เซอร์นี้ยังเข้ารหัสไม่ได้ หรือสร้างกุญแจไม่สำเร็จ', 'error');
+  const { error } = await sb.rpc('set_secret_room', { p_partner: c.id, p_on: true });
+  if (error) return handleDbError(error);
+  await loadSecretRooms();
+  loadChatList();
+  applySecretUI(c);
+  toast('เปิดห้องลับแล้ว แนะนำให้ตรวจรหัสความปลอดภัยกับเพื่อน', 'success');
+}
+
+async function disableSecretRoom() {
+  const c = activeChat;
+  if (!c) return;
+  const ok = await confirmDialog('ปิดห้องลับ', 'ข้อความต่อจากนี้จะไม่เข้ารหัสปลายทางแล้ว ข้อความลับเก่ายังอยู่ในแชทตามเดิม', 'ปิดห้องลับ', true);
+  if (!ok) return;
+  const { error } = await sb.rpc('set_secret_room', { p_partner: c.id, p_on: false });
+  if (error) return handleDbError(error);
+  await loadSecretRooms();
+  loadChatList();
+  applySecretUI(c);
+}
+
+// ค้นหาในห้องลับ: เซิร์ฟเวอร์อ่านเนื้อหาไม่ได้ จึงค้นเฉพาะข้อความที่ถอดรหัสแล้วในเครื่องนี้
+function runSecretSearch(q) {
+  const chat = activeChat;
+  const box = $('smsg-list');
+  box.innerHTML = '';
+  box.appendChild(hintNode('ห้องลับ: ค้นได้เฉพาะข้อความที่โหลดและถอดรหัสไว้ในเครื่องนี้'));
+  const needle = q.toLowerCase();
+  const rows = (state.messages[chat.id] || [])
+    .filter(m => m.dec && m.text && m.kind === 'text' && !social.hidden.has(m.id) && m.text.toLowerCase().includes(needle))
+    .slice(-40).reverse();
+  if (!rows.length) { box.appendChild(hintNode('ไม่พบข้อความที่ตรงกัน')); return; }
+  rows.forEach(m => {
+    const card = document.createElement('div');
+    card.className = 'req-card tap';
+    const head = document.createElement('div');
+    head.className = 'hint';
+    head.style.marginTop = '0';
+    head.textContent = `${m.isMe ? 'คุณ' : nameOf(chat)} · ${dividerLabel(m.ts)}`;
+    const body = document.createElement('div');
+    body.className = 'pin-text';
+    const at = m.text.toLowerCase().indexOf(needle);
+    body.appendChild(document.createTextNode(m.text.slice(Math.max(0, at - 30), at)));
+    const mark = document.createElement('mark');
+    mark.textContent = m.text.slice(at, at + q.length);
+    body.appendChild(mark);
+    body.appendChild(document.createTextNode(m.text.slice(at + q.length, at + q.length + 80)));
+    card.append(head, body);
+    card.onclick = () => jumpToMessage(m);
+    box.appendChild(card);
+  });
+}
+
 // ==================== เฟส C: ความเสถียรของแชท ====================
 
 // ---------- ส่งข้อความ: แสดงทันที + สถานะ กำลังส่ง/ส่งแล้ว/ส่งไม่สำเร็จ (กดส่งใหม่ได้) ----------
@@ -6569,15 +6903,28 @@ async function deliverMessage(chat, msg) {
     msg.status = 'sending';
     if (activeChat && activeChat.id === chat.id) loadMessages(true);
   }
+  let secretEnc = null;
+  if (!chat.isGroup && isSecret(chat.id)) {
+    try { secretEnc = await encryptPayload(chat.id, { t: msg.text, s: msg.sticker || null }); }
+    catch (e) {
+      msg.status = 'failed';
+      toast(e && e.message === 'no_partner_key'
+        ? 'ห้องลับ: เพื่อนยังไม่มีกุญแจ (ให้เพื่อนเปิดแอปเวอร์ชันล่าสุดก่อน)'
+        : 'ห้องลับ: เข้ารหัสไม่สำเร็จ ข้อความยังไม่ถูกส่ง', 'error');
+      if (activeChat && activeChat.id === chat.id) loadMessages(true);
+      return;
+    }
+  }
   const { data, error } = await sb.from('messages').insert({
     sender_id: currentUser.id,
     ...(chat.isGroup ? { group_id: chat.id } : { receiver_id: chat.id }),
-    text: msg.text,
+    text: secretEnc ? SECRET_TEXT : msg.text,
+    ...(secretEnc ? { enc: secretEnc } : {}),
     reply_to: msg.replyTo || null,
     ...(() => {
       const meta = {};
       if (chat.isGroup && ((msg.mentions && msg.mentions.length) || msg.mentionAll)) { meta.mentions = msg.mentions || []; meta.all = !!msg.mentionAll; }
-      if (msg.sticker) meta.sticker = msg.sticker;
+      if (msg.sticker && !secretEnc) meta.sticker = msg.sticker;
       return Object.keys(meta).length ? { meta } : {};
     })(),
     ...(msg.ttl ? { ttl_seconds: msg.ttl } : {})
@@ -6589,7 +6936,9 @@ async function deliverMessage(chat, msg) {
   } else {
     // แทนข้อความชั่วคราวด้วยข้อความจริง (ถ้า Realtime ส่งมาก่อนแล้ว จะไม่ซ้ำ)
     state.messages[chat.id] = (state.messages[chat.id] || []).filter(m => m.id !== msg.id);
-    addLocal(chat.id, toLocal(data));
+    const local = toLocal(data);
+    if (secretEnc) { local.text = msg.text; local.sticker = msg.sticker || null; local.dec = true; }   // ข้อความของเราเอง: เก็บเนื้อหาจริงไว้แสดงได้ทันที
+    addLocal(chat.id, local);
   }
   if (activeChat && activeChat.id === chat.id) loadMessages(true);
   loadChatList();
@@ -7416,7 +7765,7 @@ function updateComposerState() {
   $('mic-btn').disabled = blocked;
   $('message-input').placeholder = blocked
     ? 'คุณบล็อกผู้ใช้นี้ไว้ ปลดบล็อกเพื่อส่งข้อความ'
-    : (activeChat.isSaved ? 'จดข้อความไว้ที่นี่' : `พิมพ์ข้อความถึง ${nameOf(activeChat)}`);
+    : (activeChat.isSaved ? 'จดข้อความไว้ที่นี่' : composerPlaceholder());
 }
 
 // ---------- รายงาน ----------
@@ -8261,6 +8610,7 @@ function previewText(chat, last) {
   if (isRoomLocked(chat.id)) return '🔒 ห้องนี้ถูกล็อก';
   if (!last) return chat.isGroup ? 'เริ่มต้นการสนทนาของกลุ่ม' : 'เริ่มต้นการสนทนา';
   if (last.kind === 'system') return msgLabel(last);
+  if (isSecret(chat.id) && !chat.isGroup && last.kind === 'text') return '🔒 ' + (last.isMe ? 'คุณส่งข้อความลับ' : 'ข้อความลับ');
   if (chat.isGroup) return (last.isMe ? 'คุณ' : groupSenderName(chat, last.senderId)) + ': ' + msgLabel(last);
   return (last.isMe ? 'คุณ: ' : '') + msgLabel(last);
 }
