@@ -168,6 +168,11 @@
 
         <div id="friend-banner" class="friend-banner hidden-element"></div>
 
+        <div id="secret-banner" class="secret-banner hidden-element">
+          <span id="secret-banner-text"></span>
+          <button type="button" class="chip" onclick="openSafety()">รหัสความปลอดภัย</button>
+        </div>
+
         <div id="call-banner" class="call-banner hidden-element">
           <span id="call-banner-text"></span>
           <button type="button" id="call-banner-btn" class="chip primary" onclick="joinOpenCall()">เข้าร่วม</button>
@@ -1121,6 +1126,21 @@
     <div class="inc-info"><strong id="inc-name"></strong><span id="inc-text"></span></div>
     <button type="button" class="inc-btn decline" onclick="declineIncoming()">ปฏิเสธ</button>
     <button type="button" class="inc-btn accept" onclick="acceptIncoming()">รับสาย</button>
+  </div>
+
+  <!-- รหัสความปลอดภัยของห้องลับ -->
+  <div id="safety-modal" class="modal hidden-element" onclick="if(event.target===this)closeModal('safety-modal')">
+    <div class="modal-content">
+      <h3>รหัสความปลอดภัย</h3>
+      <span class="hint" style="margin-top:0">ห้องลับกับ <b id="safety-name"></b></span>
+      <div id="safety-code" class="safety-code"></div>
+      <span class="hint">ให้ทั้งสองฝ่ายเปิดหน้านี้ แล้วอ่านเลขให้กันฟังทางโทรศัพท์หรือเจอหน้ากัน ถ้าตรงกันทุกกลุ่ม แสดงว่าไม่มีใครสวมกุญแจกลางทาง ถ้าเลขเปลี่ยนไปภายหลัง แปลว่ามีเครื่องใหม่เข้าร่วม (หรือมีการสวมกุญแจ) ควรตรวจอีกครั้ง</span>
+      <div id="safety-verified" class="hint hidden-element" style="color:#34d399">✓ คุณตรวจรหัสนี้แล้ว</div>
+      <div class="modal-actions">
+        <button class="secondary-btn" onclick="closeModal('safety-modal')">ปิด</button>
+        <button class="primary-btn" onclick="markSafetyVerified()">ตรงกันแล้ว</button>
+      </div>
+    </div>
   </div>
 
   <!-- กล่องยืนยัน -->
