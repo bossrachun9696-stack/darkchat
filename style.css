@@ -1555,3 +1555,17 @@ body[data-mode="glass"] .chat-item-wrap .chat-item[style*="translateX("] {
 .q-opt.active .q-dot { background: radial-gradient(circle, #fff 0 40%, transparent 44%); border-color: #fff; }
 .q-opt strong { display: block; font-size: 0.92rem; }
 .q-opt small { display: block; font-size: 0.74rem; opacity: 0.78; }
+
+
+/* ================= ห้องลับ (เข้ารหัสปลายทาง) ================= */
+.secret-banner {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 7px 16px; font-size: 0.84rem;
+  background: color-mix(in srgb, #6366f1 22%, var(--bg-solid)); border-bottom: 1px solid #818cf8;
+}
+.safety-code {
+  margin: 12px 0; padding: 14px; border-radius: 14px; text-align: center; font-variant-numeric: tabular-nums;
+  font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 1.15rem; line-height: 1.9; letter-spacing: 0.06em; word-spacing: 0.4em;
+  background: var(--input-bg); border: 1px solid var(--border-color);
+}
+.chat-area.secret-mode .attach-menu button:not([onclick^="openSavedChat"]) { display: none; }
+.chat-area.secret-mode .mic-btn { display: none !important; }
