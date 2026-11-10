@@ -1651,3 +1651,8 @@ body[data-mode="glass"] .chat-item-wrap .chat-item[style*="translateX("] {
 .ai-body p:last-child { margin-bottom: 0; }
 .ai-typing { padding: 7px 16px; font-size: 0.84rem; background: color-mix(in srgb, #a855f7 20%, var(--bg-solid)); border-bottom: 1px solid #c084fc; }
 .tr-line { margin-top: 6px; padding-top: 6px; border-top: 1px dashed rgba(255, 255, 255, 0.35); font-size: 0.86rem; opacity: 0.92; word-break: break-word; }
+
+
+/* แก้: ฟอร์มพิมพ์ถามน้องโบ๊ะบ๊ะ (ช่องพิมพ์ต้องกว้าง ปุ่มส่งต้องเล็ก) */
+.bo-form textarea { width: auto; flex: 1 1 0; }
+.bo-form .primary-btn { width: auto; flex: 0 0 auto; padding: 11px 22px; align-self: flex-end; }
