@@ -130,7 +130,7 @@
 
         <div class="search-box">
           <button type="button" id="bo-btn" class="bo-btn" aria-label="คุยกับน้องโบ๊ะบ๊ะ" title="น้องโบ๊ะบ๊ะ ผู้ช่วย AI" onclick="openBoChat()">
-            <img class="bo-img" alt="" onerror="boImgError(this)"><span class="bo-fallback">🤖</span>
+            <img class="bo-img" alt=""><span class="bo-fallback">🤖</span>
             <span class="bo-dot"></span>
           </button>
           <input type="search" id="search-input" placeholder="ค้นหาในรายการแชท" oninput="filterChats()">
@@ -431,6 +431,14 @@
           <span class="hint">ดูว่าบัญชีนี้ล็อกอินอยู่ที่เครื่องไหนบ้าง และสั่งออกจากระบบเครื่องอื่นได้</span>
         </div>
         <button type="button" class="mini-btn ghost" onclick="openDevices()">ดู</button>
+      </div>
+
+      <div class="set-row">
+        <div>
+          <strong>สำรองกุญแจห้องลับ</strong>
+          <span class="hint">ย้ายเครื่องหรือล้างเบราว์เซอร์แล้วยังอ่านข้อความลับเก่าได้ (ล็อกด้วยรหัสสำรองของคุณเอง)</span>
+        </div>
+        <button type="button" class="mini-btn ghost" onclick="openBackup()">จัดการ</button>
       </div>
 
       <div class="set-row">
@@ -1160,7 +1168,7 @@
   <div id="bo-modal" class="modal hidden-element" onclick="if(event.target===this)closeBoChat()">
     <div class="modal-content bo-panel">
       <div class="bo-head">
-        <div class="bo-avatar"><img class="bo-img" alt="" onerror="boImgError(this)"><span class="bo-fallback">🤖</span></div>
+        <div class="bo-avatar"><img class="bo-img" alt=""><span class="bo-fallback">🤖</span></div>
         <div class="bo-title"><strong>น้องโบ๊ะบ๊ะ</strong><span>ผู้ช่วย AI ของ DarkChat</span></div>
         <button type="button" id="bo-quality" class="chip" onclick="toggleBoQuality()">⚡ เร็ว</button>
         <button type="button" class="icon-btn" aria-label="ล้างการสนทนา" title="ล้างการสนทนา" onclick="clearBoChat()">🗑</button>
@@ -1183,7 +1191,7 @@
   <div id="bo-room-modal" class="modal hidden-element" onclick="if(event.target===this)closeModal('bo-room-modal')">
     <div class="modal-content">
       <div class="bo-head">
-        <div class="bo-avatar"><img class="bo-img" alt="" onerror="boImgError(this)"><span class="bo-fallback">🤖</span></div>
+        <div class="bo-avatar"><img class="bo-img" alt=""><span class="bo-fallback">🤖</span></div>
         <div class="bo-title"><strong>เรียกน้องโบ๊ะบ๊ะ</strong><span>ทุกคนในห้องจะเห็นคำถามและคำตอบ</span></div>
       </div>
       <form onsubmit="submitBoRoom(event)">
@@ -1212,6 +1220,49 @@
         <button type="button" id="tr-off" class="secondary-btn danger hidden-element" onclick="saveTranslate(false)">ปิดการแปล</button>
         <button type="button" class="secondary-btn" onclick="closeModal('tr-modal')">ยกเลิก</button>
         <button type="button" class="primary-btn" onclick="saveTranslate(true)">เปิดการแปล</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- สำรองกุญแจห้องลับ -->
+  <div id="backup-modal" class="modal hidden-element" onclick="if(event.target===this)closeModal('backup-modal')">
+    <div class="modal-content">
+      <h3>สำรองกุญแจห้องลับ</h3>
+      <div id="bk-loading" class="hint" style="margin-top:0">กำลังตรวจสอบ…</div>
+
+      <div id="bk-off" class="hidden-element">
+        <span class="hint" style="margin-top:0">กุญแจที่อ่านข้อความลับอยู่ในเครื่องแต่ละเครื่อง ถ้าล้างเบราว์เซอร์หรือเปลี่ยนเครื่อง จะอ่านข้อความลับเก่าไม่ได้ การสำรองจะเก็บ "กุญแจกู้คืน" ที่ล็อกด้วยรหัสสำรองของคุณไว้ เครื่องใหม่ใส่รหัสนี้แล้วอ่านข้อความเก่าได้ (เซิร์ฟเวอร์เห็นแต่ข้อมูลที่ล็อกแล้ว)</span>
+        <label for="bk-pass1">ตั้งรหัสสำรอง (อย่างน้อย 10 ตัวอักษร แนะนำประโยคยาวๆ ที่จำได้)</label>
+        <input type="password" id="bk-pass1" autocomplete="new-password">
+        <label for="bk-pass2">ยืนยันรหัสสำรอง</label>
+        <input type="password" id="bk-pass2" autocomplete="new-password">
+        <div class="modal-actions">
+          <button type="button" class="secondary-btn" onclick="closeModal('backup-modal')">ปิด</button>
+          <button type="button" id="bk-enable" class="primary-btn" onclick="bkEnable()">เปิดการสำรอง</button>
+        </div>
+      </div>
+
+      <div id="bk-on" class="hidden-element">
+        <div id="bk-status" class="hint" style="margin-top:0"></div>
+        <div id="bk-restore-box" class="hidden-element">
+          <label for="bk-pass-r">เครื่องนี้ยังไม่ได้กู้คืน ใส่รหัสสำรองเพื่ออ่านข้อความลับเก่า</label>
+          <input type="password" id="bk-pass-r" autocomplete="current-password">
+          <button type="button" id="bk-restore" class="primary-btn" style="margin-top:8px" onclick="bkRestore()">กู้คืนบนเครื่องนี้</button>
+        </div>
+        <div id="bk-progress" class="hint"></div>
+        <details class="bk-more">
+          <summary>เปลี่ยนรหัสสำรอง</summary>
+          <label for="bk-old">รหัสสำรองเดิม</label>
+          <input type="password" id="bk-old" autocomplete="current-password">
+          <label for="bk-new">รหัสสำรองใหม่ (อย่างน้อย 10 ตัวอักษร)</label>
+          <input type="password" id="bk-new" autocomplete="new-password">
+          <button type="button" id="bk-change" class="secondary-btn" style="margin-top:8px" onclick="bkChange()">เปลี่ยนรหัส</button>
+        </details>
+        <div class="modal-actions">
+          <button type="button" id="bk-sync" class="secondary-btn" onclick="bkSync()">ซิงก์ประวัติเข้าสำรอง</button>
+          <button type="button" id="bk-remove" class="secondary-btn danger" onclick="bkRemove()">ปิดการสำรอง</button>
+          <button type="button" class="primary-btn" onclick="closeModal('backup-modal')">ปิด</button>
+        </div>
       </div>
     </div>
   </div>
