@@ -59,6 +59,7 @@ function thaiError(error) {
   if (/should be different|same as the old/i.test(msg)) return 'รหัสผ่านใหม่ต้องไม่ซ้ำกับรหัสเดิม';
   if (/too_many_new_chats/i.test(msg)) return 'เริ่มแชทกับคนใหม่ได้ไม่เกิน 20 คนต่อวัน';
   if (/no_partner_key/i.test(msg)) return 'ห้องลับ: เพื่อนยังไม่มีกุญแจ (ให้เพื่อนเปิดแอปเวอร์ชันล่าสุดก่อน)';
+  if (/secret_no_translate/i.test(msg)) return 'ห้องลับใช้แปลภาษาไม่ได้';
   if (/secret_no_key_partner/i.test(msg)) return 'เพื่อนยังไม่ได้เปิดแอปเวอร์ชันใหม่ จึงยังเปิดห้องลับไม่ได้ (ให้เพื่อนเปิดแอปเวอร์ชันล่าสุดก่อน)';
   if (/secret_no_key_me/i.test(msg)) return 'เครื่องนี้ยังไม่มีกุญแจเข้ารหัส ปิดแล้วเปิดแอปใหม่อีกครั้ง';
   if (/secret_required/i.test(msg)) return 'ห้องลับต้องส่งแบบเข้ารหัสเท่านั้น (ลองเปิดแอปใหม่)';
@@ -170,6 +171,7 @@ async function enterApp(user) {
     registerThisDevice();
     e2eeInit();
     loadSecretRooms().then(() => loadChatList());
+    loadTranslateSettings();
     checkRingingCalls();
     await loadSocial();
     await loadGroups();
@@ -606,6 +608,7 @@ function toLocal(row) {
     media: row.media || null,
     batch: (row.meta && row.meta.batch) || null,
     rmeta: row.meta || null,
+    tr: (row.meta && row.meta.tr) || null,
     sticker: (row.meta && row.meta.sticker) || null,
     enc: row.enc || null,
     encFrom: row.sender_id,
@@ -761,7 +764,8 @@ const RT_EXTRAS = [
   { table: 'calls', events: [['*', p => onCallChange(p)]] },
   { table: 'call_streams', events: [['INSERT', p => onStreamChange(p)], ['DELETE', p => onStreamChange(p)]] },
   { table: 'message_reactions', events: [['*', p => onReactionChange(p)]] },
-  { table: 'secret_rooms', events: [['*', p => onSecretChange(p)]] }
+  { table: 'secret_rooms', events: [['*', p => onSecretChange(p)]] },
+  { table: 'chat_translate', events: [['*', p => onTranslateChange(p)]] }
 ];
 
 function onCoreStatus(status, gen) {
@@ -1517,11 +1521,21 @@ function loadMessages(keepScroll) {
     }
     prev = msg;
 
+    if (msg.kind === 'ai') { container.appendChild(buildAiCard(msg)); return; }
     if (msg.kind === 'call') {
       const cm = document.createElement('div');
       cm.className = 'call-msg';
-      const ct = document.createElement('span');
-      ct.textContent = msg.text;
+      const info = callCardInfo(msg, activeChat);
+      const ct = document.createElement('div');
+      ct.className = 'call-info';
+      const ctTitle = document.createElement('strong');
+      ctTitle.textContent = `${info.icon} ${info.title}`;
+      ct.appendChild(ctTitle);
+      if (info.status) {
+        const ctSub = document.createElement('span');
+        ctSub.textContent = info.status;
+        ct.appendChild(ctSub);
+      }
       cm.appendChild(ct);
       const cmeta = msg.rmeta || {};
       const openCall = activeChat && CALL.open[activeChat.id];
@@ -1608,6 +1622,12 @@ function loadMessages(keepScroll) {
       const text = document.createElement('span');
       linkify(text, msg.text);
       bubble.appendChild(text);
+    }
+    if (msg.tr && msg.tr.t && msg.kind === 'text') {   // คำแปลอัตโนมัติ แสดงใต้ข้อความ
+      const tl = document.createElement('div');
+      tl.className = 'tr-line';
+      tl.textContent = '🌐 ' + msg.tr.t;
+      bubble.appendChild(tl);
     }
 
     const meta = document.createElement('div');
@@ -1753,6 +1773,7 @@ function openMsgMenu(msg) {
   if (msg.text && !msg.sticker) add('คัดลอก', () => copyText(msg.text));
   if (msg.media && !msg.media.expired && !msg.media.pending) {
     add(msg.media.type === 'file' ? 'ดาวน์โหลดไฟล์' : 'บันทึกลงเครื่อง', () => saveMedia(msg.media), 'primary-btn');
+    if (msg.media.type === 'image') add('คัดลอกรูป', () => copyImageToClipboard(msg.media));
   }
   if (msg.status === 'sent' && msg.kind !== 'card' && !(msg.media && (msg.media.expired || msg.media.pending))) add('ส่งต่อ', () => openForward(msg));
   if (msg.status === 'sent') add('เตือนฉัน', () => openRemind(msg));
@@ -1848,6 +1869,8 @@ async function submitEdit(text) {
   }
   m.text = text;
   m.editedAt = Date.now();
+  m.tr = null;
+  maybeTranslate(activeChat, m.id, text);
   composer.type = null; composer.msg = null;
   renderComposerBar();
   loadMessages(true);
@@ -1983,6 +2006,7 @@ function onMessageUpdate(row) {
     m.editedAt = row.edited_at ? new Date(row.edited_at).getTime() : null;
     m.pinnedAt = row.pinned_at ? new Date(row.pinned_at).getTime() : null;
     m.expiresAt = row.expires_at ? new Date(row.expires_at).getTime() : null;
+    m.tr = (row.meta && row.meta.tr) || null;
     if (m.enc) { if (row.media && row.media.expired && m.media) m.media.expired = true; }
     else m.media = row.media || null;
   }
@@ -2325,6 +2349,10 @@ function openRoomMenu() {
     add('ปิดรหัสล็อกห้อง', () => removeRoomCode(c), 'secondary-btn danger');
   } else {
     add('ตั้งรหัสล็อกห้องนี้', () => setRoomCode(c));
+  }
+  if (!isSecret(c.id)) {   // น้องโบ๊ะบ๊ะและแปลภาษา ส่งข้อความไปประมวลผลที่ Google จึงใช้ในห้องลับไม่ได้
+    add('เรียกน้องโบ๊ะบ๊ะ', openBoRoom);
+    if (!c.isGroup && !c.isSaved) add('แปลภาษาอัตโนมัติ', openTranslate);
   }
   if (!c.isGroup && !c.isSaved) {
     if (isSecret(c.id)) {
@@ -3302,6 +3330,7 @@ function updateGallery(animate = true) {
   track.style.transform = `translateX(${-gal.idx * 100}%)`;
   const m = gal.items[gal.idx];
   $('mv-name').textContent = m ? (m.name || '') : '';
+  $('mv-copy').classList.toggle('hidden-element', !m || m.type !== 'image');
   $('mv-count').textContent = gal.items.length > 1 ? `${gal.idx + 1} / ${gal.items.length}` : '';
   $('mv-goto').classList.toggle('hidden-element', !(m && m.mid));
   $('mv-prev').classList.toggle('hidden-element', gal.idx === 0);
@@ -6287,6 +6316,9 @@ function updateWatchBadge() {
   const b = $('call-chat-badge');
   b.textContent = CALL.wUnread > 9 ? '9+' : String(CALL.wUnread);
   b.classList.toggle('hidden-element', CALL.wUnread === 0);
+  const ib = $('imm-chat-badge');
+  ib.textContent = b.textContent;
+  ib.classList.toggle('hidden-element', CALL.wUnread === 0);
 }
 
 function toggleWatchChat() {
@@ -7011,6 +7043,451 @@ function setupSecretAudio(wrap, a, m) {
   wrap.appendChild(btn);
 }
 
+// ==================== การ์ดสายโทร: บอกว่าใครโทรหาใคร ====================
+function callCardInfo(msg, chat) {
+  const t = msg.text || '';
+  const video = (msg.rmeta && msg.rmeta.kind === 'video') || /วิดีโอ/.test(t);
+  const icon = video ? '📹' : '📞';
+  const missed = /ไม่ได้รับ/.test(t);
+  const declined = /ปฏิเสธ/.test(t);
+  const ringing = /กำลังโทร/.test(t);
+  const peer = nameOf(chat);
+  let title;
+  if (chat.isGroup) {
+    const who = msg.isMe ? 'คุณ' : groupSenderName(chat, msg.senderId);
+    title = `${who} เริ่ม${video ? 'วิดีโอคอลกลุ่ม' : 'สายกลุ่ม'}`;
+  } else title = msg.isMe ? `คุณโทรหา ${peer}` : `${peer} โทรหาคุณ`;
+  let status;
+  if (ringing) status = 'กำลังโทร…';
+  else if (missed) status = chat.isGroup ? 'ไม่มีใครเข้าร่วม' : (msg.isMe ? `${peer} ไม่ได้รับสาย` : 'คุณไม่ได้รับสาย');
+  else if (declined) status = chat.isGroup ? '' : (msg.isMe ? `${peer} ปฏิเสธสาย` : 'คุณปฏิเสธสาย');
+  else status = (t.split(' · ')[1] || '').trim();
+  return { icon, title, status };
+}
+
+// ==================== วางรูปจากคลิปบอร์ด (Ctrl+V) / ลากไฟล์มาวาง / คัดลอกรูปออกไปวางที่อื่น ====================
+function pastedName(f, i) {
+  const d = new Date();
+  const p = n => String(n).padStart(2, '0');
+  const ext = ((f.type || 'image/png').split('/')[1] || 'png').replace('jpeg', 'jpg').replace(/[^a-z0-9]/gi, '').slice(0, 5) || 'png';
+  return `image-${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}${i ? '-' + (i + 1) : ''}.${ext}`;
+}
+
+function handlePastedFiles(files) {
+  if (!activeChat || !files.length) return false;
+  const imgs = files.filter(f => (f.type || '').startsWith('image/'));
+  const use = (imgs.length ? imgs : files).slice(0, 10)
+    .map((f, i) => ((f.name && !/^image\.(png|jpe?g|gif|webp)$/i.test(f.name)) ? f : new File([f], pastedName(f, i), { type: f.type })));
+  if (!$('send-preview').classList.contains('hidden-element')) {   // หน้าต่างส่งรูปเปิดอยู่แล้ว: เพิ่มเข้าไปในชุดเดิม
+    sp.files = [...sp.files, ...use].slice(0, 10);
+    renderSendPreview();
+  } else openSendPreview(use);
+  return true;
+}
+
+function onGlobalPaste(e) {
+  const cd = e.clipboardData;
+  if (!cd || !currentUser || !activeChat) return;
+  if (!$('call-overlay').classList.contains('hidden-element')) return;   // กำลังอยู่ในหน้าจอสาย
+  const t = e.target;
+  if (t && t.closest && t.closest('.modal-content') && $('send-preview').classList.contains('hidden-element')) return;   // กำลังพิมพ์ในหน้าต่างอื่น
+  if (cd.getData && cd.getData('text/plain')) return;                        // มีข้อความอยู่ด้วย: วางเป็นข้อความตามปกติ
+  const files = [...(cd.files || [])];
+  if (!files.length) {
+    for (const it of (cd.items || [])) if (it.kind === 'file') { const f = it.getAsFile(); if (f) files.push(f); }
+  }
+  if (!files.length) return;
+  e.preventDefault();
+  handlePastedFiles(files);
+}
+
+function setupDropZone() {
+  const ca = $('chat-area');
+  const hasFiles = e => e.dataTransfer && [...(e.dataTransfer.types || [])].includes('Files');
+  ['dragenter', 'dragover'].forEach(ev => ca.addEventListener(ev, e => {
+    if (!activeChat || !hasFiles(e)) return;
+    e.preventDefault();
+    ca.classList.add('drag-over');
+  }));
+  ca.addEventListener('dragleave', e => { if (e.target === ca) ca.classList.remove('drag-over'); });
+  ca.addEventListener('drop', e => {
+    ca.classList.remove('drag-over');
+    if (!activeChat || !hasFiles(e)) return;
+    e.preventDefault();
+    handlePastedFiles([...e.dataTransfer.files]);
+  });
+}
+
+// แปลงรูปเป็น PNG (คลิปบอร์ดของเบราว์เซอร์รับรูปแบบ PNG เท่านั้น)
+async function toPngBlob(blob) {
+  if (blob.type === 'image/png') return blob;
+  const url = URL.createObjectURL(blob);
+  try {
+    const img = await new Promise((resolve, reject) => { const i = new Image(); i.onload = () => resolve(i); i.onerror = reject; i.src = url; });
+    const cv = document.createElement('canvas');
+    cv.width = img.naturalWidth; cv.height = img.naturalHeight;
+    cv.getContext('2d').drawImage(img, 0, 0);
+    return await new Promise((resolve, reject) => cv.toBlob(b => (b ? resolve(b) : reject(new Error('png'))), 'image/png'));
+  } finally { URL.revokeObjectURL(url); }
+}
+
+async function copyImageToClipboard(m) {
+  if (!navigator.clipboard || !window.ClipboardItem) return toast('เบราว์เซอร์นี้ยังคัดลอกรูปไม่ได้ ใช้ปุ่มบันทึกแทน', 'error');
+  try {
+    toast('กำลังเตรียมรูป…', 'info');
+    // ส่ง Promise เข้าคลิปบอร์ดทันที (ให้ยังนับเป็นการกดของผู้ใช้ ซึ่ง Safari/Chrome บังคับ)
+    const pngPromise = (async () => {
+      const url = await mediaUrlFor(m, 'full');
+      if (!url) throw new Error('missing');
+      return toPngBlob(await (await fetch(url)).blob());
+    })();
+    await navigator.clipboard.write([new ClipboardItem({ 'image/png': pngPromise })]);
+    toast('คัดลอกรูปแล้ว กด Ctrl+V ที่ไหนก็วางได้', 'success');
+  } catch (e) {
+    toast('คัดลอกรูปไม่สำเร็จ (อาจไม่ได้รับอนุญาตคลิปบอร์ด) ลองบันทึกรูปแทน', 'error');
+  }
+}
+
+function copyCurrentImage() { const m = gal.items[gal.idx]; if (m && m.type === 'image') copyImageToClipboard(m); }
+
+// ==================== เฟส I: น้องโบ๊ะบ๊ะ (AI Assistant) + แปลภาษาอัตโนมัติ ====================
+const BO_IMG_COUNT = 14;
+const BO_SUGGEST = ['ตั้ง PIN ล็อกแอปยังไง', 'วิธีสตรีมหน้าจอให้เพื่อนดู', 'ห้องลับคืออะไร ใช้ยังไง', 'ช่วยวางแผนเที่ยว 3 วัน 2 คืน', 'แปลประโยคนี้เป็นภาษาอังกฤษหน่อย'];
+const BO_BUBBLES = ['สวัสดีครับ ถามน้องโบ๊ะบ๊ะได้นะ 💬', 'ไม่รู้จะตั้งค่าตรงไหน? ถามน้องได้เลย', 'อยากรู้อะไร ถามน้องโบ๊ะบ๊ะได้ทุกเรื่อง', 'ให้น้องช่วยคิดเมนูอาหารมื้อนี้ไหม? 🍜'];
+const TR_LANGS = [['th', 'ไทย'], ['en', 'English'], ['zh', '中文'], ['ja', '日本語'], ['ko', '한국어'], ['vi', 'Tiếng Việt'], ['id', 'Bahasa Indonesia'],
+  ['ms', 'Bahasa Melayu'], ['fr', 'Français'], ['de', 'Deutsch'], ['es', 'Español'], ['ru', 'Русский'], ['ar', 'العربية'], ['hi', 'हिन्दी'],
+  ['lo', 'ລາວ'], ['my', 'မြန်မာ'], ['km', 'ខ្មែរ']];
+const bo = { msgs: [], busy: false, bubbleIdx: 0, bubbleHidden: false };
+
+// ---------- รูปน้อง: ไฟล์ "Ai Assistant/1.png" ถึง "14.png" เปลี่ยนรูปทุก 10 นาที ----------
+function boImageIndex() { return (Math.floor(Date.now() / 600000) % BO_IMG_COUNT) + 1; }
+function boImageUrl(n) { return encodeURI('Ai Assistant/' + n + '.png'); }
+
+function refreshBoImages() {
+  const n = boImageIndex();
+  document.querySelectorAll('.bo-img').forEach(img => {
+    if (img.dataset.n === String(n)) return;
+    img.dataset.n = String(n);
+    img.classList.remove('failed');
+    img.src = boImageUrl(n);
+  });
+}
+
+function showBoBubble() {
+  if (bo.bubbleHidden || !currentUser) return;
+  const b = $('bo-bubble');
+  $('bo-bubble-text').textContent = BO_BUBBLES[bo.bubbleIdx++ % BO_BUBBLES.length];
+  b.classList.remove('hidden-element');
+  setTimeout(() => b.classList.add('hidden-element'), 9000);
+}
+
+function hideBoBubble(forever) {
+  $('bo-bubble').classList.add('hidden-element');
+  if (forever) bo.bubbleHidden = true;
+}
+
+function setupBo() {
+  refreshBoImages();
+  setInterval(refreshBoImages, 30000);
+  setTimeout(showBoBubble, 4000);
+  setInterval(showBoBubble, 4 * 60000);
+  const input = $('bo-input');
+  input.addEventListener('input', () => { input.style.height = 'auto'; input.style.height = Math.min(input.scrollHeight, 120) + 'px'; });
+  input.addEventListener('keydown', e => {   // คอมพิวเตอร์: Enter ส่ง / Shift+Enter ขึ้นบรรทัดใหม่ (มือถือ Enter = บรรทัดใหม่)
+    if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && !(window.matchMedia && matchMedia('(pointer: coarse)').matches)) {
+      e.preventDefault();
+      sendBoMessage();
+    }
+  });
+}
+
+// ---------- แสดงข้อความของน้อง (รองรับ ตัวหนา ลำดับเลข จุดนำ โค้ด ลิงก์) แบบปลอดภัย ไม่ใช้ innerHTML ----------
+function renderAiText(el, text) {
+  el.textContent = '';
+  const inline = (parent, s) => {
+    const re = /(\*\*[^*\n]+\*\*|`[^`\n]+`)/g;
+    let last = 0, m;
+    const plain = str => { if (!str) return; const sp = document.createElement('span'); linkify(sp, str); parent.appendChild(sp); };
+    while ((m = re.exec(s))) {
+      plain(s.slice(last, m.index));
+      const tok = m[0];
+      const node = document.createElement(tok.startsWith('**') ? 'strong' : 'code');
+      node.textContent = tok.startsWith('**') ? tok.slice(2, -2) : tok.slice(1, -1);
+      parent.appendChild(node);
+      last = m.index + tok.length;
+    }
+    plain(s.slice(last));
+  };
+  let list = null, listType = '';
+  const closeList = () => { list = null; listType = ''; };
+  String(text).replace(/\r/g, '').split('\n').forEach(raw => {
+    const line = raw.replace(/^#{1,6}\s+/, '');
+    const ol = /^\s*(\d+)[.)]\s+(.*)$/.exec(line);
+    const ul = /^\s*[-*•]\s+(.*)$/.exec(line);
+    if (ol || ul) {
+      const want = ol ? 'ol' : 'ul';
+      if (!list || listType !== want) {
+        list = document.createElement(want);
+        listType = want;
+        if (ol && ol[1] !== '1') list.start = parseInt(ol[1], 10);
+        el.appendChild(list);
+      }
+      const li = document.createElement('li');
+      inline(li, ol ? ol[2] : ul[1]);
+      list.appendChild(li);
+      return;
+    }
+    closeList();
+    if (!line.trim()) return;
+    const p = document.createElement('p');
+    inline(p, line);
+    el.appendChild(p);
+  });
+}
+
+async function invokeAi(body) {
+  const { data, error } = await sb.functions.invoke('ai-assistant', { body });
+  if (error) {
+    let code = '';
+    try { const j = await error.context.json(); code = j.error || ''; } catch (e) { /* ไม่เป็นไร */ }
+    if (!code && error.context && error.context.status === 404) code = 'ai_not_deployed';
+    throw new Error(code || 'ai_failed');
+  }
+  if (data && data.error) throw new Error(data.error);
+  return data || {};
+}
+
+function aiErrorText(err) {
+  const m = (err && err.message) || '';
+  if (/ai_not_deployed/.test(m)) return 'ยังไม่ได้สร้างฟังก์ชัน ai-assistant บน Supabase ครับ (ดูขั้นตอนตั้งค่า)';
+  if (/ai_not_configured/.test(m)) return 'น้องโบ๊ะบ๊ะยังไม่พร้อมใช้งานครับ (ผู้ดูแลระบบยังไม่ได้ตั้งค่า GEMINI_API_KEY)';
+  if (/ai_rate_limit/.test(m)) return 'วันนี้ใช้น้องครบโควต้าแล้วครับ พรุ่งนี้มาคุยกันใหม่นะ';
+  if (/ai_busy/.test(m)) return 'ตอนนี้โควต้าฟรีของ Google เต็มชั่วคราว ลองใหม่อีกสักครู่นะครับ';
+  if (/ai_blocked/.test(m)) return 'ขอโทษครับ น้องตอบเรื่องนี้ไม่ได้ ลองถามด้วยคำอื่นดูนะ';
+  if (/ai_key_invalid/.test(m)) return 'GEMINI_API_KEY ใช้ไม่ได้ ให้ผู้ดูแลระบบตรวจที่ Supabase > Edge Functions > Secrets';
+  if (/ai_room_forbidden/.test(m)) return 'ห้องนี้ถามน้องไม่ได้ (เช่น ห้องลับ หรือถูกบล็อก)';
+  if (/unauthorized/.test(m)) return 'กรุณาเข้าสู่ระบบใหม่ครับ';
+  return 'น้องขัดข้องชั่วคราวครับ ลองใหม่อีกครั้งนะ';
+}
+
+// ---------- คุยส่วนตัวกับน้องโบ๊ะบ๊ะ (ประวัติเก็บเฉพาะในเครื่องนี้) ----------
+function boKey() { return 'darkchat_bo_' + currentUser.id; }
+function loadBoHistory() { try { bo.msgs = JSON.parse(localStorage.getItem(boKey()) || '[]').slice(-40); } catch (e) { bo.msgs = []; } }
+function saveBoHistory() { try { localStorage.setItem(boKey(), JSON.stringify(bo.msgs.slice(-40))); } catch (e) { /* ไม่เป็นไร */ } }
+
+function openBoChat() {
+  if (!currentUser) return;
+  loadBoHistory();
+  renderBoChat();
+  openModal('bo-modal');
+  hideBoBubble(false);
+  setTimeout(() => $('bo-input').focus(), 150);
+}
+
+function closeBoChat() { closeModal('bo-modal'); }
+
+function clearBoChat() {
+  bo.msgs = [];
+  saveBoHistory();
+  renderBoChat();
+}
+
+function boRow(m) {
+  const row = document.createElement('div');
+  row.className = 'bo-row' + (m.role === 'user' ? ' me' : '');
+  if (m.role !== 'user') {
+    const av = document.createElement('div');
+    av.className = 'bo-mini';
+    const img = document.createElement('img');
+    img.className = 'bo-img';
+    img.alt = '';
+    img.onerror = () => img.classList.add('failed');
+    const fb = document.createElement('span');
+    fb.className = 'bo-fallback';
+    fb.textContent = '🤖';
+    av.append(img, fb);
+    row.appendChild(av);
+  }
+  const b = document.createElement('div');
+  b.className = 'bo-msg' + (m.err ? ' err' : '');
+  if (m.role === 'user') b.textContent = m.text; else renderAiText(b, m.text);
+  row.appendChild(b);
+  return row;
+}
+
+function renderBoChat() {
+  const box = $('bo-msgs');
+  box.innerHTML = '';
+  if (!bo.msgs.length) {
+    box.appendChild(boRow({ role: 'model', text: 'สวัสดีครับ น้องโบ๊ะบ๊ะเองครับ ผู้ช่วย AI ของ DarkChat\nสอนใช้งานหรือตั้งค่าแอป หรือจะคุยเรื่องอื่นๆ ก็ถามได้เลยครับ' }));
+  }
+  bo.msgs.forEach(m => box.appendChild(boRow(m)));
+  if (bo.busy) box.appendChild(boRow({ role: 'model', text: 'กำลังพิมพ์…' }));
+  const chips = $('bo-chips');
+  chips.innerHTML = '';
+  if (!bo.msgs.length && !bo.busy) {
+    BO_SUGGEST.forEach(t => {
+      const c = document.createElement('button');
+      c.type = 'button';
+      c.className = 'chip';
+      c.textContent = t;
+      c.onclick = () => sendBoMessage(null, t);
+      chips.appendChild(c);
+    });
+  }
+  refreshBoImages();
+  box.scrollTop = box.scrollHeight;
+}
+
+async function sendBoMessage(e, preset) {
+  if (e) e.preventDefault();
+  if (bo.busy) return;
+  const input = $('bo-input');
+  const text = (preset || input.value).trim();
+  if (!text) return;
+  input.value = '';
+  input.style.height = 'auto';
+  bo.msgs.push({ role: 'user', text });
+  bo.busy = true;
+  saveBoHistory();
+  renderBoChat();
+  try {
+    const hist = bo.msgs.filter(m => !m.err).slice(-20).map(m => ({ role: m.role, text: m.text }));
+    const out = await invokeAi({ mode: 'chat', messages: hist });
+    bo.msgs.push({ role: 'model', text: out.reply || 'ขอโทษครับ น้องตอบไม่ได้ ลองถามใหม่นะ' });
+  } catch (err) {
+    bo.msgs.push({ role: 'model', text: aiErrorText(err), err: true });
+  }
+  bo.busy = false;
+  saveBoHistory();
+  if (!$('bo-modal').classList.contains('hidden-element')) renderBoChat();
+}
+
+// ---------- ถามน้องในห้องแชท: คำตอบเป็นข้อความที่ทุกคนในห้องเห็น ----------
+function openBoRoom() {
+  const c = activeChat;
+  if (!c || isSecret(c.id)) return;
+  $('bo-room-input').value = '';
+  openModal('bo-room-modal');
+  refreshBoImages();
+  setTimeout(() => $('bo-room-input').focus(), 120);
+}
+
+function aiTyping(chatId, on) {
+  $('ai-typing').classList.toggle('hidden-element', !(on && activeChat && activeChat.id === chatId));
+}
+
+async function submitBoRoom(e) {
+  e.preventDefault();
+  const c = activeChat;
+  const q = $('bo-room-input').value.trim();
+  if (!c || !q) return;
+  closeModal('bo-room-modal');
+  aiTyping(c.id, true);
+  try {
+    await invokeAi({ mode: 'room', chat_id: c.id, is_group: !!c.isGroup, question: q });
+    setTimeout(() => catchUp(false), 1200);   // เผื่อ Realtime ช้า ให้ดึงคำตอบมาเติมแน่ๆ
+  } catch (err) {
+    toast(aiErrorText(err), 'error');
+  } finally {
+    aiTyping(c.id, false);
+  }
+}
+
+function buildAiCard(msg) {
+  const chat = activeChat;
+  const card = document.createElement('div');
+  card.className = 'ai-card';
+  const asker = msg.isMe ? 'คุณ' : (chat.isGroup ? groupSenderName(chat, msg.senderId) : nameOf(chat));
+  const q = document.createElement('div');
+  q.className = 'ai-q';
+  q.textContent = `💬 ${asker} ถามน้องโบ๊ะบ๊ะ: ${(msg.rmeta && msg.rmeta.q) || ''}`;
+  const head = document.createElement('div');
+  head.className = 'ai-head';
+  const av = document.createElement('div');
+  av.className = 'bo-mini';
+  const img = document.createElement('img');
+  img.className = 'bo-img';
+  img.alt = '';
+  img.onerror = () => img.classList.add('failed');
+  const fb = document.createElement('span');
+  fb.className = 'bo-fallback';
+  fb.textContent = '🤖';
+  av.append(img, fb);
+  const nm = document.createElement('strong');
+  nm.textContent = 'น้องโบ๊ะบ๊ะ';
+  const tm = document.createElement('span');
+  tm.className = 'ai-time';
+  tm.textContent = fmtClock(msg.ts);
+  head.append(av, nm, tm);
+  const body = document.createElement('div');
+  body.className = 'ai-body';
+  renderAiText(body, msg.text);
+  card.append(q, head, body);
+  return card;
+}
+
+// ---------- แปลภาษาอัตโนมัติ (แชทส่วนตัว) ----------
+async function loadTranslateSettings() {
+  const { data, error } = await sb.from('chat_translate').select('a, b, lang_a, lang_b, enabled');
+  if (error) return;   // ยังไม่ได้รัน SQL ของเฟสนี้
+  const me = currentUser.id;
+  state.translate = {};
+  (data || []).forEach(r => {
+    const mine = r.a === me;
+    state.translate[mine ? r.b : r.a] = { on: !!r.enabled, my: mine ? r.lang_a : r.lang_b, peer: mine ? r.lang_b : r.lang_a };
+  });
+}
+
+function onTranslateChange() { loadTranslateSettings().then(() => { if (activeChat) loadMessages(true); }); }
+
+function openTranslate() {
+  const c = activeChat;
+  if (!c || c.isGroup || c.isSaved || isSecret(c.id)) return;
+  const cur = (state.translate && state.translate[c.id]) || { on: false, my: 'th', peer: 'en' };
+  [['tr-my', cur.my], ['tr-peer', cur.peer]].forEach(([id, val]) => {
+    const sel = $(id);
+    sel.innerHTML = '';
+    TR_LANGS.forEach(([code, name]) => {
+      const o = document.createElement('option');
+      o.value = code;
+      o.textContent = name;
+      sel.appendChild(o);
+    });
+    sel.value = val;
+  });
+  $('tr-peer-name').textContent = nameOf(c);
+  $('tr-off').classList.toggle('hidden-element', !cur.on);
+  openModal('tr-modal');
+}
+
+async function saveTranslate(on) {
+  const c = activeChat;
+  if (!c) return;
+  const my = $('tr-my').value, peer = $('tr-peer').value;
+  if (on && my === peer) return toast('เลือกภาษาของสองฝ่ายให้ต่างกันนะครับ', 'error');
+  const { error } = await sb.rpc('set_chat_translate', { p_partner: c.id, p_on: on, p_my_lang: my, p_partner_lang: peer });
+  if (error) return handleDbError(error);
+  closeModal('tr-modal');
+  await loadTranslateSettings();
+  loadMessages(true);
+  toast(on ? 'เปิดแปลภาษาอัตโนมัติแล้ว' : 'ปิดแปลภาษาอัตโนมัติแล้ว', 'success');
+}
+
+// ส่งข้อความแล้ว ค่อยแปลตามหลัง (ไม่หน่วงการส่ง) แล้วแนบคำแปลให้ทั้งสองฝ่ายเห็น
+async function maybeTranslate(chat, msgId, text) {
+  const t = state.translate && state.translate[chat.id];
+  if (!t || !t.on || chat.isGroup || chat.isSaved || isSecret(chat.id) || !text || !msgId) return;
+  try {
+    const out = await invokeAi({ mode: 'translate', text, to: t.peer, from: t.my });
+    if (out.same || !out.translation) return;
+    const { error } = await sb.rpc('attach_translation', { p_message: msgId, p_lang: t.peer, p_text: out.translation });
+    if (error) throw error;
+  } catch (e) {
+    if (!state.trWarned) { state.trWarned = true; toast('แปลภาษาไม่สำเร็จ: ' + aiErrorText(e), 'error'); }
+  }
+}
+
 // ==================== เฟส C: ความเสถียรของแชท ====================
 
 // ---------- ส่งข้อความ: แสดงทันที + สถานะ กำลังส่ง/ส่งแล้ว/ส่งไม่สำเร็จ (กดส่งใหม่ได้) ----------
@@ -7055,6 +7532,7 @@ async function deliverMessage(chat, msg) {
     const local = toLocal(data);
     if (secretEnc) { local.text = msg.text; local.sticker = msg.sticker || null; local.dec = true; }   // ข้อความของเราเอง: เก็บเนื้อหาจริงไว้แสดงได้ทันที
     addLocal(chat.id, local);
+    if (!secretEnc && !msg.sticker) maybeTranslate(chat, data.id, msg.text);   // แปลอัตโนมัติ (ถ้าเปิดไว้) หลังส่งสำเร็จ
   }
   if (activeChat && activeChat.id === chat.id) loadMessages(true);
   loadChatList();
@@ -7621,6 +8099,9 @@ function setupGlobalListeners() {
   setupViewport();
   startIdleWatcher();
   startRealtimeWatchdog();
+  document.addEventListener('paste', onGlobalPaste);
+  setupDropZone();
+  setupBo();
   $('call-overlay').addEventListener('click', resumeCallPlayback);
   $('call-overlay').addEventListener('click', onImmersiveTap);
   $('call-overlay').addEventListener('click', () => $('q-menu').classList.add('hidden-element'));
@@ -8726,6 +9207,7 @@ function previewText(chat, last) {
   if (isRoomLocked(chat.id)) return '🔒 ห้องนี้ถูกล็อก';
   if (!last) return chat.isGroup ? 'เริ่มต้นการสนทนาของกลุ่ม' : 'เริ่มต้นการสนทนา';
   if (last.kind === 'system') return msgLabel(last);
+  if (last.kind === 'ai') return '🤖 น้องโบ๊ะบ๊ะตอบ';
   if (isSecret(chat.id) && !chat.isGroup && last.kind === 'text') return '🔒 ' + (last.isMe ? 'คุณส่งข้อความลับ' : 'ข้อความลับ');
   if (chat.isGroup) return (last.isMe ? 'คุณ' : groupSenderName(chat, last.senderId)) + ': ' + msgLabel(last);
   return (last.isMe ? 'คุณ: ' : '') + msgLabel(last);
