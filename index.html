@@ -1086,6 +1086,7 @@
     <div class="call-bg"></div>
     <div id="call-screen" class="call-screen hidden-element">
       <video id="call-screen-video" autoplay playsinline></video>
+      <div id="zoom-badge" class="zoom-badge hidden-element"></div>
     </div>
     <div id="call-screen-chips" class="screen-chips"></div>
     <div id="call-grid" class="call-grid"></div>
@@ -1195,7 +1196,13 @@
         <div class="bo-title"><strong>เรียกน้องโบ๊ะบ๊ะ</strong><span>ทุกคนในห้องจะเห็นคำถามและคำตอบ</span></div>
       </div>
       <form onsubmit="submitBoRoom(event)">
+        <div class="bo-presets">
+          <button type="button" class="chip" onclick="boRoomPreset('sum')">สรุปแชทล่าสุด</button>
+          <button type="button" class="chip" onclick="boRoomPreset('reply')">ช่วยคิดคำตอบ</button>
+          <button type="button" class="chip" onclick="boRoomPreset('trans')">แปลข้อความล่าสุด</button>
+        </div>
         <textarea id="bo-room-input" rows="4" maxlength="600" placeholder="พิมพ์คำถามถึงน้อง… เช่น ช่วยแนะนำร้านอาหาร หรือแปลประโยคนี้ให้หน่อย (วางรูปด้วย Ctrl+V หรือกด 📎 เพื่อแนบได้)"></textarea>
+        <label class="bo-ctx"><input type="checkbox" id="bo-room-ctx"> <span>ให้น้องอ่านข้อความล่าสุดในห้องนี้ประกอบการตอบ <small>(ส่งข้อความล่าสุดสูงสุด 20 ข้อความให้ Google Gemini ประมวลผล และทุกคนในห้องจะเห็นว่าน้องอ่านแชทประกอบ)</small></span></label>
         <div id="bo-room-files" class="ai-files"></div>
         <input type="file" id="bo-room-file" hidden multiple accept="image/*,application/pdf,text/*,.md,.csv,.json,.log,.js,.ts,.py,.html,.css,.xml,.yml,.yaml,.sql" onchange="onAiFilePicked('room', this)">
         <div class="modal-actions">
@@ -1210,12 +1217,14 @@
   <!-- แปลภาษาอัตโนมัติ -->
   <div id="tr-modal" class="modal hidden-element" onclick="if(event.target===this)closeModal('tr-modal')">
     <div class="modal-content">
-      <h3>แปลภาษาอัตโนมัติ</h3>
-      <span class="hint" style="margin-top:0">AI จะแปลข้อความในห้องนี้ให้ คำแปลแสดงใต้ข้อความ และทั้งสองฝ่ายเห็นเหมือนกัน (ข้อความจะถูกส่งให้ Google Gemini แปล)</span>
-      <label for="tr-my">ภาษาของฉัน</label>
+      <h3 id="tr-title">แปลภาษาอัตโนมัติ</h3>
+      <span id="tr-hint" class="hint" style="margin-top:0">AI จะแปลข้อความในห้องนี้ให้ คำแปลแสดงใต้ข้อความ และทั้งสองฝ่ายเห็นเหมือนกัน (ข้อความจะถูกส่งให้ Google Gemini แปล)</span>
+      <label id="tr-my-label" for="tr-my">ภาษาของฉัน</label>
       <select id="tr-my"></select>
-      <label for="tr-peer">ภาษาของ <b id="tr-peer-name"></b></label>
-      <select id="tr-peer"></select>
+      <div id="tr-peer-box">
+        <label for="tr-peer">ภาษาของ <b id="tr-peer-name"></b></label>
+        <select id="tr-peer"></select>
+      </div>
       <div class="modal-actions">
         <button type="button" id="tr-off" class="secondary-btn danger hidden-element" onclick="saveTranslate(false)">ปิดการแปล</button>
         <button type="button" class="secondary-btn" onclick="closeModal('tr-modal')">ยกเลิก</button>
