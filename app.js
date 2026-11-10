@@ -7089,6 +7089,7 @@ function onGlobalPaste(e) {
   const cd = e.clipboardData;
   if (!cd || !currentUser || !activeChat) return;
   if (!$('call-overlay').classList.contains('hidden-element')) return;   // กำลังอยู่ในหน้าจอสาย
+  if (!$('bo-modal').classList.contains('hidden-element') || !$('bo-room-modal').classList.contains('hidden-element')) return;   // หน้าต่างน้องโบ๊ะบ๊ะเปิดอยู่
   const t = e.target;
   if (t && t.closest && t.closest('.modal-content') && $('send-preview').classList.contains('hidden-element')) return;   // กำลังพิมพ์ในหน้าต่างอื่น
   if (cd.getData && cd.getData('text/plain')) return;                        // มีข้อความอยู่ด้วย: วางเป็นข้อความตามปกติ
@@ -7164,9 +7165,10 @@ function boImageIndex() { return (Math.floor(Date.now() / 600000) % BO_IMG_COUNT
 function boImageUrl(n) { return encodeURI('Ai Assistant/' + n + '.png'); }
 
 function refreshBoImages() {
-  const n = boImageIndex();
+  const n = boPick();
   document.querySelectorAll('.bo-img').forEach(img => {
-    if (img.dataset.n === String(n)) return;
+    if (!n) { img.classList.add('failed'); return; }
+    if (img.dataset.n === String(n) && !img.classList.contains('failed')) return;
     img.dataset.n = String(n);
     img.classList.remove('failed');
     img.src = boImageUrl(n);
@@ -7191,6 +7193,13 @@ function setupBo() {
   setInterval(refreshBoImages, 30000);
   setTimeout(showBoBubble, 4000);
   setInterval(showBoBubble, 4 * 60000);
+  updateBoQualityBtn();
+  [['bo-input', 'bo'], ['bo-room-input', 'room']].forEach(([id, tg]) => $(id).addEventListener('paste', e => {
+    const files = [...((e.clipboardData && e.clipboardData.files) || [])];
+    if (!files.length) return;            // ไม่มีไฟล์ในคลิปบอร์ด: วางข้อความตามปกติ
+    e.preventDefault();
+    addAiFiles(tg, files);
+  }));
   const input = $('bo-input');
   input.addEventListener('input', () => { input.style.height = 'auto'; input.style.height = Math.min(input.scrollHeight, 120) + 'px'; });
   input.addEventListener('keydown', e => {   // คอมพิวเตอร์: Enter ส่ง / Shift+Enter ขึ้นบรรทัดใหม่ (มือถือ Enter = บรรทัดใหม่)
@@ -7245,15 +7254,38 @@ function renderAiText(el, text) {
   });
 }
 
+// อ่านรายละเอียดจากการตอบกลับที่ไม่ใช่ 2xx ของ Edge Function (รองรับหลายรูปแบบ)
+async function readFnError(error) {
+  const ctx = error && error.context;
+  const status = ctx && ctx.status;
+  let raw = '';
+  try {
+    if (ctx && typeof ctx.text === 'function') raw = await ctx.text();
+    else if (ctx && typeof ctx.json === 'function') raw = JSON.stringify(await ctx.json());
+  } catch (e) { /* ไม่เป็นไร */ }
+  let j = null;
+  try { j = JSON.parse(raw); } catch (e) { /* ไม่ใช่ JSON */ }
+  return { status, raw, j };
+}
+
+function aiErrFromRaw(status, raw, fallbackMsg) {
+  let j = null;
+  try { j = JSON.parse(raw); } catch (e) { /* ไม่ใช่ JSON */ }
+  let code = (j && j.error) || '';
+  if (!code && status === 404) code = 'ai_not_deployed';
+  const text = (j && ((typeof j.code === 'string' && !j.error ? j.code + ' ' : '') + (j.detail || j.message || ''))) || raw || String(fallbackMsg || '');
+  const err = new Error(code || 'ai_failed');
+  err.noCode = !code;
+  err.detail = (status ? 'HTTP ' + status + ': ' : '') + String(text).slice(0, 220);
+  err.status = status;
+  return err;
+}
+
 async function invokeAi(body) {
   const { data, error } = await sb.functions.invoke('ai-assistant', { body });
   if (error) {
-    let code = '', detail = '';
-    try { const j = await error.context.json(); code = j.error || ''; detail = j.detail || ''; } catch (e) { /* ไม่เป็นไร */ }
-    if (!code && error.context && error.context.status === 404) code = 'ai_not_deployed';
-    const err = new Error(code || 'ai_failed');
-    err.detail = detail || (code ? '' : String(error.message || '').slice(0, 160));
-    throw err;
+    const { status, raw } = await readFnError(error);
+    throw aiErrFromRaw(status, raw, error.message);
   }
   if (data && data.error) { const err = new Error(data.error); err.detail = data.detail || ''; throw err; }
   return data || {};
@@ -7267,8 +7299,17 @@ function aiErrorText(err) {
   if (/ai_busy/.test(m)) return 'ตอนนี้โควต้าของ Google เต็มชั่วคราว ลองใหม่อีกสักครู่นะครับ' + (err && err.detail ? '\n(รายละเอียดทางเทคนิค: ' + err.detail + ')' : '');
   if (/ai_blocked/.test(m)) return 'ขอโทษครับ น้องตอบเรื่องนี้ไม่ได้ ลองถามด้วยคำอื่นดูนะ';
   const why = err && err.detail ? '\n(รายละเอียดทางเทคนิค: ' + err.detail + ')' : '';
+  if (err && err.noCode && /JWT|UNAUTHORIZED|HTTP 401/i.test(String(err.detail || ''))) {
+    return 'ฟังก์ชัน ai-assistant ไม่ยอมรับการล็อกอิน ให้ปิด "Verify JWT" ในการตั้งค่าของฟังก์ชันนี้ แล้ว Deploy ใหม่' + why;
+  }
+  if (err && err.noCode && /BOOT_ERROR|HTTP 5(00|46)/i.test(String(err.detail || ''))) {
+    return 'ฟังก์ชัน ai-assistant เริ่มทำงานไม่ได้ (โค้ดที่วางอาจไม่ครบหรือผิด) ให้วางโค้ดใหม่ทั้งไฟล์แล้ว Deploy' + why;
+  }
   if (/ai_key_invalid/.test(m)) return 'GEMINI_API_KEY ใช้ไม่ได้หรือไม่มีสิทธิ์ ให้ผู้ดูแลระบบตรวจที่ Supabase > Edge Functions > Secrets' + why;
   if (/ai_model_unavailable/.test(m)) return 'รุ่น AI ของ Google ที่ตั้งไว้ใช้ไม่ได้กับคีย์นี้ (ระบบลองรุ่นสำรองแล้วแต่ยังไม่ผ่าน)' + why;
+  if (/too_many_files/.test(m)) return 'แนบไฟล์ได้ไม่เกิน 4 ไฟล์ต่อคำถามครับ';
+  if (/bad_file/.test(m)) return 'ชนิดไฟล์ที่แนบไม่รองรับ (รองรับรูปภาพ PDF และไฟล์ข้อความ)';
+  if (/files_too_big/.test(m)) return 'ไฟล์แนบรวมกันใหญ่เกินไป ลองลดจำนวนหรือใช้ไฟล์เล็กลงนะครับ';
   if (/ai_room_forbidden/.test(m)) return 'ห้องนี้ถามน้องไม่ได้ (เช่น ห้องลับ หรือถูกบล็อก)';
   if (/unauthorized/.test(m)) return 'กรุณาเข้าสู่ระบบใหม่ครับ';
   return 'น้องขัดข้องชั่วคราวครับ ลองใหม่อีกครั้งนะ' + why;
@@ -7277,7 +7318,10 @@ function aiErrorText(err) {
 // ---------- คุยส่วนตัวกับน้องโบ๊ะบ๊ะ (ประวัติเก็บเฉพาะในเครื่องนี้) ----------
 function boKey() { return 'darkchat_bo_' + currentUser.id; }
 function loadBoHistory() { try { bo.msgs = JSON.parse(localStorage.getItem(boKey()) || '[]').slice(-40); } catch (e) { bo.msgs = []; } }
-function saveBoHistory() { try { localStorage.setItem(boKey(), JSON.stringify(bo.msgs.slice(-40))); } catch (e) { /* ไม่เป็นไร */ } }
+function saveBoHistory() {
+  const slim = bo.msgs.filter(m => !m.streaming).slice(-40).map(m => ({ role: m.role, text: m.text, err: m.err, meta: m.meta, files: (m.files || []).map(x => ({ name: x.name, kind: x.kind })) }));
+  try { localStorage.setItem(boKey(), JSON.stringify(slim)); } catch (e) { /* ไม่เป็นไร */ }
+}
 
 function openBoChat() {
   if (!currentUser) return;
@@ -7305,7 +7349,7 @@ function boRow(m) {
     const img = document.createElement('img');
     img.className = 'bo-img';
     img.alt = '';
-    img.onerror = () => img.classList.add('failed');
+    img.onerror = () => boImgError(img);
     const fb = document.createElement('span');
     fb.className = 'bo-fallback';
     fb.textContent = '🤖';
@@ -7314,7 +7358,16 @@ function boRow(m) {
   }
   const b = document.createElement('div');
   b.className = 'bo-msg' + (m.err ? ' err' : '');
-  if (m.role === 'user') b.textContent = m.text; else renderAiText(b, m.text);
+  if (m.files && m.files.length) {
+    const fl = document.createElement('div');
+    fl.className = 'bo-files-line';
+    fl.textContent = '📎 ' + m.files.map(x => x.name).join(' · ');
+    b.appendChild(fl);
+  }
+  const body = document.createElement('div');
+  if (m.role === 'user') body.textContent = m.text; else renderAiText(body, m.text || 'กำลังพิมพ์…');
+  b.appendChild(body);
+  if (m.meta) { const mt = document.createElement('div'); mt.className = 'bo-meta'; mt.textContent = m.meta; b.appendChild(mt); }
   row.appendChild(b);
   return row;
 }
@@ -7326,7 +7379,6 @@ function renderBoChat() {
     box.appendChild(boRow({ role: 'model', text: 'สวัสดีครับ น้องโบ๊ะบ๊ะเองครับ ผู้ช่วย AI ของ DarkChat\nสอนใช้งานหรือตั้งค่าแอป หรือจะคุยเรื่องอื่นๆ ก็ถามได้เลยครับ' }));
   }
   bo.msgs.forEach(m => box.appendChild(boRow(m)));
-  if (bo.busy) box.appendChild(boRow({ role: 'model', text: 'กำลังพิมพ์…' }));
   const chips = $('bo-chips');
   chips.innerHTML = '';
   if (!bo.msgs.length && !bo.busy) {
@@ -7348,19 +7400,33 @@ async function sendBoMessage(e, preset) {
   if (bo.busy) return;
   const input = $('bo-input');
   const text = (preset || input.value).trim();
-  if (!text) return;
+  const files = aiFiles.bo.slice();
+  if (!text && !files.length) return;
   input.value = '';
   input.style.height = 'auto';
-  bo.msgs.push({ role: 'user', text });
+  aiFiles.bo = [];
+  renderAiFiles('bo');
+  const hist = bo.msgs.filter(m => !m.err && !m.streaming).slice(-19).map(m => ({ role: m.role, text: m.text }));
+  hist.push({ role: 'user', text: text || 'ช่วยดูไฟล์ที่แนบมาให้หน่อย' });
+  bo.msgs.push({ role: 'user', text: text || '(แนบไฟล์)', files: files.map(x => ({ name: x.name, kind: x.kind, thumb: x.thumb })) });
+  const reply = { role: 'model', text: '', streaming: true };
+  bo.msgs.push(reply);
   bo.busy = true;
-  saveBoHistory();
   renderBoChat();
+  let pending = false;
+  const t0 = Date.now();
   try {
-    const hist = bo.msgs.filter(m => !m.err).slice(-20).map(m => ({ role: m.role, text: m.text }));
-    const out = await invokeAi({ mode: 'chat', messages: hist });
-    bo.msgs.push({ role: 'model', text: out.reply || 'ขอโทษครับ น้องตอบไม่ได้ ลองถามใหม่นะ' });
+    const out = await streamAi(
+      { mode: 'chat', stream: true, quality: boQuality(), messages: hist, files: files.map(x => ({ name: x.name, mime: x.mime, b64: x.b64, text: x.text })) },
+      t => { reply.text = t; if (!pending) { pending = true; requestAnimationFrame(() => { pending = false; updateBoLast(reply); }); } }
+    );
+    reply.text = out.text;
+    const ms = (out.info && out.info.ms) || {};
+    reply.meta = '⚡ ' + (ms.first ? (ms.first / 1000).toFixed(1) + ' วิ ถึงคำแรก · ' : '') + ((ms.total || (Date.now() - t0)) / 1000).toFixed(1) + ' วิ รวม' + (out.info && out.info.model ? ' · ' + out.info.model : '');
+    reply.streaming = false;
   } catch (err) {
-    bo.msgs.push({ role: 'model', text: aiErrorText(err), err: true });
+    if (reply.text) { reply.text += '\n\n(' + aiErrorText(err).split('\n')[0] + ')'; reply.streaming = false; }
+    else { const i = bo.msgs.indexOf(reply); if (i >= 0) bo.msgs.splice(i, 1); bo.msgs.push({ role: 'model', text: aiErrorText(err), err: true }); }
   }
   bo.busy = false;
   saveBoHistory();
@@ -7372,6 +7438,8 @@ function openBoRoom() {
   const c = activeChat;
   if (!c || isSecret(c.id)) return;
   $('bo-room-input').value = '';
+  aiFiles.room = [];
+  renderAiFiles('room');
   openModal('bo-room-modal');
   refreshBoImages();
   setTimeout(() => $('bo-room-input').focus(), 120);
@@ -7385,11 +7453,13 @@ async function submitBoRoom(e) {
   e.preventDefault();
   const c = activeChat;
   const q = $('bo-room-input').value.trim();
-  if (!c || !q) return;
+  const files = aiFiles.room.slice();
+  if (!c || (!q && !files.length)) return;
   closeModal('bo-room-modal');
   aiTyping(c.id, true);
   try {
-    await invokeAi({ mode: 'room', chat_id: c.id, is_group: !!c.isGroup, question: q });
+    await invokeAi({ mode: 'room', chat_id: c.id, is_group: !!c.isGroup, question: q, files: files.map(x => ({ name: x.name, mime: x.mime, b64: x.b64, text: x.text })) });
+    aiFiles.room = [];
     setTimeout(() => catchUp(false), 1200);   // เผื่อ Realtime ช้า ให้ดึงคำตอบมาเติมแน่ๆ
   } catch (err) {
     toast(aiErrorText(err), 'error');
@@ -7413,7 +7483,7 @@ function buildAiCard(msg) {
   const img = document.createElement('img');
   img.className = 'bo-img';
   img.alt = '';
-  img.onerror = () => img.classList.add('failed');
+  img.onerror = () => boImgError(img);
   const fb = document.createElement('span');
   fb.className = 'bo-fallback';
   fb.textContent = '🤖';
@@ -7427,6 +7497,14 @@ function buildAiCard(msg) {
   const body = document.createElement('div');
   body.className = 'ai-body';
   renderAiText(body, msg.text);
+  const names = msg.rmeta && msg.rmeta.files;
+  if (names && names.length) {
+    const fl = document.createElement('div');
+    fl.className = 'ai-files-line';
+    fl.textContent = '📎 แนบ: ' + names.join(' · ');
+    card.append(q, fl, head, body);
+    return card;
+  }
   card.append(q, head, body);
   return card;
 }
@@ -7490,6 +7568,203 @@ async function maybeTranslate(chat, msgId, text) {
   } catch (e) {
     if (!state.trWarned) { state.trWarned = true; toast('แปลภาษาไม่สำเร็จ: ' + aiErrorText(e), 'error'); }
   }
+}
+
+// ==================== น้องโบ๊ะบ๊ะ: แนบไฟล์ / สตรีมคำตอบ / โหมดเร็ว-ฉลาด ====================
+const AI_MAX_FILES = 4;
+const AI_MAX_BYTES = 4000000;   // ขนาดรวม (base64) ของไฟล์แนบต่อคำถาม
+const AI_TEXT_EXT = /\.(txt|md|csv|json|log|js|ts|py|html|css|xml|yml|yaml|ini|sql|java|c|cpp|cs|go|rs|php|sh)$/i;
+const aiFiles = { bo: [], room: [] };   // ไฟล์ที่เตรียมไว้ [{ name, kind, mime, b64 | text, thumb }]
+const boBad = new Set();                // เลขรูปน้องที่โหลดไม่ได้ (เช่น ไฟล์ไม่มีหรือพิมพ์ชื่อไม่ตรง)
+
+// รูปน้อง: ข้ามเลขที่โหลดไม่ได้ ไปใช้เลขถัดไปที่โหลดได้
+function boPick() {
+  let n = boImageIndex();
+  for (let i = 0; i < BO_IMG_COUNT; i++) {
+    if (!boBad.has(n)) return n;
+    n = (n % BO_IMG_COUNT) + 1;
+  }
+  return 0;
+}
+
+function boImgError(img) {
+  boBad.add(parseInt(img.dataset.n || '0', 10));
+  const n = boPick();
+  if (!n) { img.classList.add('failed'); return; }
+  img.dataset.n = String(n);
+  img.src = boImageUrl(n);
+}
+
+function aiFileKind(f) {
+  const t = f.type || '';
+  if (t.startsWith('image/')) return 'image';
+  if (t === 'application/pdf' || /\.pdf$/i.test(f.name || '')) return 'pdf';
+  if (t.startsWith('text/') || AI_TEXT_EXT.test(f.name || '')) return 'text';
+  return null;
+}
+
+function blobToB64(blob) {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onerror = () => reject(new Error('อ่านไฟล์ไม่ได้'));
+    r.onload = () => resolve(String(r.result).split(',')[1] || '');
+    r.readAsDataURL(blob);
+  });
+}
+
+// ย่อรูปให้ไม่เกิน 1280 พิกเซล เป็น JPEG (เล็กลง ส่งไวขึ้น) + ภาพตัวอย่างเล็กๆ ไว้แสดงในแชท
+async function aiImageToJpeg(file) {
+  let src;
+  try { src = await createImageBitmap(file); }
+  catch (e) {
+    src = await new Promise((resolve, reject) => {
+      const url = URL.createObjectURL(file);
+      const im = new Image();
+      im.onload = () => { resolve(im); setTimeout(() => URL.revokeObjectURL(url), 5000); };
+      im.onerror = () => reject(new Error('เปิดรูปนี้ไม่ได้ (บางเครื่องไม่รองรับไฟล์ HEIC ให้ลองแคปหน้าจอหรือแปลงเป็น JPG)'));
+      im.src = url;
+    });
+  }
+  const w0 = src.width || src.naturalWidth, h0 = src.height || src.naturalHeight;
+  const draw = (max, q) => {
+    const k = Math.min(1, max / Math.max(w0, h0));
+    const cv = document.createElement('canvas');
+    cv.width = Math.max(1, Math.round(w0 * k)); cv.height = Math.max(1, Math.round(h0 * k));
+    const cx = cv.getContext('2d');
+    cx.fillStyle = '#fff'; cx.fillRect(0, 0, cv.width, cv.height);
+    cx.drawImage(src, 0, 0, cv.width, cv.height);
+    return cv.toDataURL('image/jpeg', q);
+  };
+  return { b64: draw(1280, 0.82).split(',')[1], thumb: draw(96, 0.6) };
+}
+
+async function aiPrepareFile(file) {
+  const kind = aiFileKind(file);
+  if (!kind) throw new Error('รองรับเฉพาะรูปภาพ, PDF และไฟล์ข้อความ');
+  if (kind === 'text') {
+    if (file.size > 400000) throw new Error('ไฟล์ข้อความใหญ่เกิน 400 KB');
+    return { name: file.name, kind, text: (await file.text()).slice(0, 60000) };
+  }
+  if (kind === 'pdf') {
+    if (file.size > 3000000) throw new Error('ไฟล์ PDF ใหญ่เกิน 3 MB');
+    return { name: file.name, kind, mime: 'application/pdf', b64: await blobToB64(file) };
+  }
+  const { b64, thumb } = await aiImageToJpeg(file);
+  return { name: file.name || 'image.jpg', kind, mime: 'image/jpeg', b64, thumb };
+}
+
+function aiBytes(list) { return list.reduce((n, f) => n + (f.b64 ? f.b64.length : (f.text || '').length), 0); }
+
+async function addAiFiles(target, files) {
+  const list = aiFiles[target];
+  for (const f of files) {
+    if (list.length >= AI_MAX_FILES) { toast(`แนบได้ไม่เกิน ${AI_MAX_FILES} ไฟล์ต่อคำถาม`, 'error'); break; }
+    try {
+      const p = await aiPrepareFile(f);
+      if (aiBytes(list) + (p.b64 ? p.b64.length : p.text.length) > AI_MAX_BYTES) { toast('ไฟล์แนบรวมกันใหญ่เกินไป ลองลดจำนวนหรือใช้ไฟล์เล็กลง', 'error'); break; }
+      list.push(p);
+    } catch (e) { toast(`${f.name || 'ไฟล์'}: ${e.message || 'แนบไม่ได้'}`, 'error'); }
+  }
+  renderAiFiles(target);
+}
+
+function renderAiFiles(target) {
+  const box = $(target === 'bo' ? 'bo-files' : 'bo-room-files');
+  box.innerHTML = '';
+  aiFiles[target].forEach((f, i) => {
+    const chip = document.createElement('div');
+    chip.className = 'ai-file';
+    if (f.thumb) { const im = document.createElement('img'); im.src = f.thumb; im.alt = ''; chip.appendChild(im); }
+    else { const ic = document.createElement('span'); ic.className = 'ai-file-ic'; ic.textContent = f.kind === 'pdf' ? '📕' : '📄'; chip.appendChild(ic); }
+    const nm = document.createElement('span');
+    nm.className = 'ai-file-name';
+    nm.textContent = f.name;
+    const x = document.createElement('button');
+    x.type = 'button';
+    x.textContent = '✕';
+    x.setAttribute('aria-label', 'เอาไฟล์ออก');
+    x.onclick = () => { aiFiles[target].splice(i, 1); renderAiFiles(target); };
+    chip.append(nm, x);
+    box.appendChild(chip);
+  });
+}
+
+function pickAiFiles(target) { $(target === 'bo' ? 'bo-file' : 'bo-room-file').click(); }
+
+function onAiFilePicked(target, input) {
+  const files = [...(input.files || [])];
+  input.value = '';
+  if (files.length) addAiFiles(target, files);
+}
+
+// ---------- สตรีมคำตอบ ----------
+function sseParse(state, chunk) {
+  state.buf += chunk;
+  const events = [];
+  let idx;
+  while ((idx = state.buf.indexOf('\n\n')) >= 0) {
+    const block = state.buf.slice(0, idx);
+    state.buf = state.buf.slice(idx + 2);
+    const line = block.split('\n').find(l => l.startsWith('data:'));
+    if (!line) continue;
+    try { events.push(JSON.parse(line.slice(5).trim())); } catch (e) { /* ข้ามบรรทัดที่อ่านไม่ได้ */ }
+  }
+  return events;
+}
+
+async function streamAi(body, onText) {
+  const { data } = await sb.auth.getSession();
+  const session = data && data.session;
+  if (!session) { const e = new Error('unauthorized'); e.detail = 'ไม่มีเซสชันล็อกอิน'; throw e; }
+  const res = await fetch(`${SUPABASE_URL}/functions/v1/ai-assistant`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + session.access_token, apikey: SUPABASE_ANON_KEY },
+    body: JSON.stringify(body)
+  });
+  if (!res.ok || !(res.headers.get('content-type') || '').includes('text/event-stream')) {
+    throw aiErrFromRaw(res.status, await res.text(), 'HTTP ' + res.status);
+  }
+  const reader = res.body.getReader();
+  const dec = new TextDecoder();
+  const st = { buf: '' };
+  let acc = '', info = null;
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    for (const ev of sseParse(st, dec.decode(value, { stream: true }))) {
+      if (ev.t) { acc += ev.t; onText(acc); }
+      else if (ev.error) { const e = new Error(ev.error); e.detail = ev.detail || ''; e.partial = acc; throw e; }
+      else if (ev.done) info = ev;
+    }
+  }
+  return { text: acc, info };
+}
+
+function boQuality() { return localStorage.getItem('darkchat_bo_quality') === 'smart' ? 'smart' : 'fast'; }
+
+function updateBoQualityBtn() {
+  const smart = boQuality() === 'smart';
+  const b = $('bo-quality');
+  b.textContent = smart ? '🧠 ฉลาด' : '⚡ เร็ว';
+  b.title = smart ? 'โหมดฉลาด: ตอบละเอียดขึ้นแต่ช้ากว่า (แตะเพื่อสลับ)' : 'โหมดเร็ว: ตอบไว กระชับ (แตะเพื่อสลับ)';
+}
+
+function toggleBoQuality() {
+  try { localStorage.setItem('darkchat_bo_quality', boQuality() === 'smart' ? 'fast' : 'smart'); } catch (e) { /* ไม่เป็นไร */ }
+  updateBoQualityBtn();
+  toast(boQuality() === 'smart' ? 'โหมดฉลาด: น้องจะตอบละเอียดขึ้น แต่ช้ากว่าเดิม' : 'โหมดเร็ว: น้องตอบไวและกระชับ', 'info');
+}
+
+function updateBoLast(reply) {
+  const rows = $('bo-msgs').querySelectorAll('.bo-row');
+  const last = rows[rows.length - 1];
+  if (!last) return;
+  const el = last.querySelector('.bo-msg');
+  if (!el) return;
+  const box = $('bo-msgs');
+  const nearBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 80;
+  renderAiText(el, reply.text || 'กำลังพิมพ์…');
+  if (nearBottom) box.scrollTop = box.scrollHeight;
 }
 
 // ==================== เฟส C: ความเสถียรของแชท ====================
