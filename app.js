@@ -5439,7 +5439,7 @@ async function signOutOthers() {
   if (!ok) return;
   // 1) ตั้งธงให้เครื่องอื่นออกจากระบบทันที  2) ยกเลิกสิทธิ์การเข้าถึงของเครื่องอื่นที่ฝั่งเซิร์ฟเวอร์
   await sb.from('devices').update({ revoked_at: new Date().toISOString() }).neq('device_key', deviceKey()).is('revoked_at', null);
-  await sb.from('e2ee_keys').update({ revoked_at: new Date().toISOString() }).neq('device_key', deviceKey()).is('revoked_at', null);
+  await sb.from('e2ee_keys').update({ revoked_at: new Date().toISOString() }).neq('device_key', deviceKey()).not('device_key', 'like', 'rk-%').is('revoked_at', null);
   const { error } = await sb.auth.signOut({ scope: 'others' });
   if (error) return handleDbError(error);
   toast('ออกจากระบบทุกเครื่องอื่นแล้ว', 'success');
@@ -6665,7 +6665,7 @@ function joinOpenCall() {
 // ข้อความแต่ละก้อนเข้ารหัสด้วยกุญแจสุ่ม AES-256-GCM แล้วห่อกุญแจนั้นให้ "ทุกเครื่อง" ของทั้งสองฝ่าย (ECDH + HKDF + AES-GCM)
 const SECRET_TEXT = '🔒 ข้อความที่เข้ารหัส';
 const ECDH_ALG = { name: 'ECDH', namedCurve: 'P-256' };
-const E2EE = { ready: null, priv: null, keyId: null, cache: {}, pending: [], queued: false };
+const E2EE = { ready: null, priv: null, keyId: null, extra: [], cache: {}, pending: [], queued: false };
 
 const enc8 = s => new TextEncoder().encode(s);
 const dec8 = b => new TextDecoder().decode(b);
@@ -6692,6 +6692,17 @@ async function deriveWrapKey(privKey, pubKey, info) {
     base, { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
 }
 
+// ห่อกุญแจข้อความ (raw) ให้ผู้รับหนึ่งราย (เครื่องหรือกุญแจกู้คืน) ด้วยกุญแจชั่วคราวใช้ครั้งเดียว
+async function wrapCekFor(raw, r) {
+  const pub = await crypto.subtle.importKey('jwk', r.pub, ECDH_ALG, true, []);
+  const eph = await crypto.subtle.generateKey(ECDH_ALG, true, ['deriveBits']);
+  const wk = await deriveWrapKey(eph.privateKey, pub, 'wrap:' + r.device_key);
+  const wiv = crypto.getRandomValues(new Uint8Array(12));
+  const w = await crypto.subtle.encrypt({ name: 'AES-GCM', iv: wiv, additionalData: enc8(r.device_key) }, wk, raw);
+  const ep = await crypto.subtle.exportKey('jwk', eph.publicKey);
+  return { d: r.device_key, e: { x: ep.x, y: ep.y }, i: b64e(wiv), w: b64e(w) };
+}
+
 // เข้ารหัสข้อความ plain (ออบเจกต์) ให้ทุกเครื่องใน recipients ([{ device_key, pub }])
 async function e2eeEncrypt(plain, senderId, partnerId, recipients) {
   const cek = await crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, true, ['encrypt']);
@@ -6699,27 +6710,34 @@ async function e2eeEncrypt(plain, senderId, partnerId, recipients) {
   const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv, additionalData: enc8(`${senderId}|${partnerId}`) }, cek, enc8(JSON.stringify(plain)));
   const raw = await crypto.subtle.exportKey('raw', cek);
   const k = [];
-  for (const r of recipients) {
-    const pub = await crypto.subtle.importKey('jwk', r.pub, ECDH_ALG, true, []);
-    const eph = await crypto.subtle.generateKey(ECDH_ALG, true, ['deriveBits']);   // กุญแจชั่วคราวใช้ครั้งเดียวต่อข้อความต่อเครื่อง
-    const wk = await deriveWrapKey(eph.privateKey, pub, 'wrap:' + r.device_key);
-    const wiv = crypto.getRandomValues(new Uint8Array(12));
-    const w = await crypto.subtle.encrypt({ name: 'AES-GCM', iv: wiv, additionalData: enc8(r.device_key) }, wk, raw);
-    const ep = await crypto.subtle.exportKey('jwk', eph.publicKey);
-    k.push({ d: r.device_key, e: { x: ep.x, y: ep.y }, i: b64e(wiv), w: b64e(w) });
-  }
+  for (const r of recipients) k.push(await wrapCekFor(raw, r));
   return { v: 1, i: b64e(iv), c: b64e(ct), k };
 }
 
-async function e2eeDecrypt(encObj, privKey, myDeviceKey, senderId, partnerId) {
-  const entry = (encObj.k || []).find(x => x.d === myDeviceKey);
-  if (!entry) throw new Error('no_entry');   // ข้อความนี้ส่งก่อนที่เครื่องนี้จะลงทะเบียนกุญแจ
-  const eph = await crypto.subtle.importKey('jwk', { kty: 'EC', crv: 'P-256', x: entry.e.x, y: entry.e.y, ext: true }, ECDH_ALG, true, []);
-  const wk = await deriveWrapKey(privKey, eph, 'wrap:' + myDeviceKey);
-  const raw = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: b64d(entry.i), additionalData: enc8(myDeviceKey) }, wk, b64d(entry.w));
+// แกะกุญแจข้อความด้วยกุญแจที่มี (cands = [{ id, priv }]) ลองทีละกุญแจ
+async function e2eeUnwrap(encObj, cands) {
+  for (const c of cands) {
+    if (!c || !c.priv) continue;
+    const entry = (encObj.k || []).find(x => x.d === c.id);
+    if (!entry) continue;
+    try {
+      const eph = await crypto.subtle.importKey('jwk', { kty: 'EC', crv: 'P-256', x: entry.e.x, y: entry.e.y, ext: true }, ECDH_ALG, true, []);
+      const wk = await deriveWrapKey(c.priv, eph, 'wrap:' + c.id);
+      return new Uint8Array(await crypto.subtle.decrypt({ name: 'AES-GCM', iv: b64d(entry.i), additionalData: enc8(c.id) }, wk, b64d(entry.w)));
+    } catch (e) { /* กุญแจนี้ไม่ใช่ ลองกุญแจถัดไป */ }
+  }
+  throw new Error('no_entry');   // ข้อความนี้ส่งก่อนที่เครื่องนี้ (หรือกุญแจกู้คืน) จะลงทะเบียนกุญแจ
+}
+
+async function e2eeDecryptWith(encObj, cands, senderId, partnerId) {
+  const raw = await e2eeUnwrap(encObj, cands);
   const cek = await crypto.subtle.importKey('raw', raw, 'AES-GCM', false, ['decrypt']);
   const pt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: b64d(encObj.i), additionalData: enc8(`${senderId}|${partnerId}`) }, cek, b64d(encObj.c));
   return JSON.parse(dec8(pt));
+}
+
+async function e2eeDecrypt(encObj, privKey, myDeviceKey, senderId, partnerId) {
+  return e2eeDecryptWith(encObj, [{ id: myDeviceKey, priv: privKey }], senderId, partnerId);
 }
 
 // รหัสความปลอดภัย (ใช้เทียบกับเพื่อนว่าตรงกัน ป้องกันการสวมกุญแจกลางทาง) = แฮชของกุญแจสาธารณะทุกเครื่องของสองฝ่าย
@@ -6770,6 +6788,7 @@ function e2eeInit() {
     if (!kp) { kp = await crypto.subtle.generateKey(ECDH_ALG, false, ['deriveBits']); await idbSet(kk, kp); }
     E2EE.priv = kp.privateKey;
     E2EE.keyId = deviceKey();
+    try { const rk = await idbGet('rk:' + currentUser.id); E2EE.extra = rk && rk.priv ? [{ id: rk.id, priv: rk.priv }] : []; } catch (e) { E2EE.extra = []; }   // กุญแจกู้คืนที่เคยกู้คืนไว้บนเครื่องนี้
     const jwk = await crypto.subtle.exportKey('jwk', kp.publicKey);
     const { error } = await sb.rpc('register_e2ee_key', { p_device_key: E2EE.keyId, p_pub: { kty: jwk.kty, crv: jwk.crv, x: jwk.x, y: jwk.y } });
     if (error) throw error;
@@ -6797,10 +6816,13 @@ async function encryptPayload(partnerId, plain) {
   return e2eeEncrypt(plain, me, partnerId, [...mine, ...theirs]);   // ผู้รับ + ทุกเครื่องของเราเอง (เครื่องอื่นของเราจะได้อ่านได้ด้วย)
 }
 
+function e2eeCands() { return [{ id: E2EE.keyId, priv: E2EE.priv }, ...E2EE.extra]; }
+
 async function decryptMsg(m) {
+  if (m.mediaEnc) { m.media = m.mediaEnc; m.mediaEnc = null; }   // ถอดซ้ำ: คืนข้อมูลไฟล์แนบที่ซ่อนไว้ตอนถอดไม่ได้
   try {
     if (!(await e2eeInit())) throw new Error('not ready');
-    const obj = await e2eeDecrypt(m.enc, E2EE.priv, E2EE.keyId, m.encFrom, m.encTo);
+    const obj = await e2eeDecryptWith(m.enc, e2eeCands(), m.encFrom, m.encTo);
     m.text = typeof obj.t === 'string' ? obj.t : '';
     m.sticker = obj.s || null;
     if (obj.m && m.media) {   // ไฟล์แนบ: ชื่อ ชนิด ขนาด และกุญแจถอดไฟล์ อยู่ในข้อมูลเข้ารหัส
@@ -6816,6 +6838,7 @@ async function decryptMsg(m) {
   } catch (e) {
     m.text = '🔒 ถอดรหัสไม่ได้ (ข้อความนี้ส่งก่อนที่เครื่องนี้จะเข้าร่วม หรือกุญแจเปลี่ยน)';
     m.decFail = true;
+    m.mediaEnc = m.media;
     m.media = null;
     m.dec = true;
   }
@@ -7162,7 +7185,8 @@ const bo = { msgs: [], busy: false, bubbleIdx: 0, bubbleHidden: false };
 
 // ---------- รูปน้อง: ไฟล์ "Ai Assistant/1.png" ถึง "14.png" เปลี่ยนรูปทุก 10 นาที ----------
 function boImageIndex() { return (Math.floor(Date.now() / 600000) % BO_IMG_COUNT) + 1; }
-function boImageUrl(n) { return encodeURI('Ai Assistant/' + n + '.png'); }
+let boExt = 'png';   // นามสกุลไฟล์ที่ใช้ได้จริง (ลอง png ก่อน ถ้าไม่ได้ลอง PNG)
+function boImageUrl(n, ext) { return encodeURI('Ai Assistant/' + n + '.' + (ext || boExt)); }
 
 function refreshBoImages() {
   const n = boPick();
@@ -7170,8 +7194,9 @@ function refreshBoImages() {
     if (!n) { img.classList.add('failed'); return; }
     if (img.dataset.n === String(n) && !img.classList.contains('failed')) return;
     img.dataset.n = String(n);
+    img.dataset.ext = boExt;
     img.classList.remove('failed');
-    img.src = boImageUrl(n);
+    img.src = boImageUrl(n, boExt);
   });
 }
 
@@ -7189,6 +7214,9 @@ function hideBoBubble(forever) {
 }
 
 function setupBo() {
+  // error/load ของรูปน้องไม่ลอยขึ้นไปหาพ่อ จึงดักตั้งแต่ขั้น capture
+  document.addEventListener('error', e => { const t = e.target; if (t && t.classList && t.classList.contains('bo-img')) boImgError(t); }, true);
+  document.addEventListener('load', e => { const t = e.target; if (t && t.classList && t.classList.contains('bo-img')) boImgOk(t); }, true);
   refreshBoImages();
   setInterval(refreshBoImages, 30000);
   setTimeout(showBoBubble, 4000);
@@ -7349,7 +7377,7 @@ function boRow(m) {
     const img = document.createElement('img');
     img.className = 'bo-img';
     img.alt = '';
-    img.onerror = () => boImgError(img);
+    boInitImg(img);
     const fb = document.createElement('span');
     fb.className = 'bo-fallback';
     fb.textContent = '🤖';
@@ -7483,7 +7511,7 @@ function buildAiCard(msg) {
   const img = document.createElement('img');
   img.className = 'bo-img';
   img.alt = '';
-  img.onerror = () => boImgError(img);
+  boInitImg(img);
   const fb = document.createElement('span');
   fb.className = 'bo-fallback';
   fb.textContent = '🤖';
@@ -7587,12 +7615,27 @@ function boPick() {
   return 0;
 }
 
+// รูปน้องโหลดไม่ได้: ลองนามสกุลอีกแบบ (png <-> PNG) ก่อน ถ้ายังไม่ได้ถึงข้ามไปเลขถัดไป
 function boImgError(img) {
-  boBad.add(parseInt(img.dataset.n || '0', 10));
+  const n = parseInt(img.dataset.n || '0', 10);
+  const ext = img.dataset.ext || boExt;
+  if (ext === 'png') { img.dataset.ext = 'PNG'; img.src = boImageUrl(n, 'PNG'); return; }
+  boBad.add(n);
+  const next = boPick();
+  if (!next) { img.classList.add('failed'); return; }
+  img.dataset.n = String(next);
+  img.dataset.ext = boExt === 'PNG' ? 'PNG' : 'png';
+  img.src = boImageUrl(next, img.dataset.ext);
+}
+
+function boImgOk(img) { if (img.dataset.ext) boExt = img.dataset.ext; }
+
+function boInitImg(img) {
   const n = boPick();
   if (!n) { img.classList.add('failed'); return; }
   img.dataset.n = String(n);
-  img.src = boImageUrl(n);
+  img.dataset.ext = boExt;
+  img.src = boImageUrl(n, boExt);
 }
 
 function aiFileKind(f) {
@@ -7765,6 +7808,246 @@ function updateBoLast(reply) {
   const nearBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 80;
   renderAiText(el, reply.text || 'กำลังพิมพ์…');
   if (nearBottom) box.scrollTop = box.scrollHeight;
+}
+
+// ==================== เฟส F3: สำรองกุญแจห้องลับด้วยรหัสผ่าน ====================
+// "กุญแจกู้คืน" (rk) = เครื่องเสมือนอีกเครื่อง: ทุกข้อความลับถูกเข้ารหัสให้มันด้วย ส่วนกุญแจส่วนตัวของมันถูกล็อกด้วยรหัสผ่านของผู้ใช้
+// เครื่องใหม่ที่ใส่รหัสสำรองถูกต้องจะได้กุญแจนี้ไปถอดข้อความเก่าได้ เซิร์ฟเวอร์เห็นแต่ข้อมูลที่ล็อกแล้ว
+const PBKDF2_ITERS = 600000;
+
+async function backupKeyFromPass(pass, salt, iters) {
+  const base = await crypto.subtle.importKey('raw', enc8(String(pass).normalize('NFKC')), 'PBKDF2', false, ['deriveKey']);
+  return crypto.subtle.deriveKey({ name: 'PBKDF2', hash: 'SHA-256', salt, iterations: iters },
+    base, { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
+}
+
+async function sealBackup(pass, rkId, privJwk, iters) {
+  const salt = crypto.getRandomValues(new Uint8Array(16));
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const key = await backupKeyFromPass(pass, salt, iters);
+  const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv, additionalData: enc8(rkId) }, key, enc8(JSON.stringify({ v: 1, id: rkId, priv: privJwk })));
+  return { salt: b64e(salt), iters, iv: b64e(iv), ct: b64e(ct) };
+}
+
+// สร้างกุญแจกู้คืนใหม่ + ล็อกด้วยรหัสผ่าน
+async function makeBackupVault(pass, iters) {
+  const it = iters || PBKDF2_ITERS;
+  const kp = await crypto.subtle.generateKey(ECDH_ALG, true, ['deriveBits']);
+  const priv = await crypto.subtle.exportKey('jwk', kp.privateKey);
+  const pub = await crypto.subtle.exportKey('jwk', kp.publicKey);
+  const rkId = 'rk-' + [...crypto.getRandomValues(new Uint8Array(16))].map(b => b.toString(16).padStart(2, '0')).join('');
+  const sealed = await sealBackup(pass, rkId, priv, it);
+  return { rkId, pub: { kty: pub.kty, crv: pub.crv, x: pub.x, y: pub.y }, ...sealed };
+}
+
+// ปลดล็อกกล่องสำรองด้วยรหัสผ่าน (รหัสผิด = โยน error) vault = แถวจากตาราง e2ee_backups
+async function unsealBackup(vault, pass) {
+  const key = await backupKeyFromPass(pass, b64d(vault.salt), vault.iters);
+  const raw = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: b64d(vault.iv), additionalData: enc8(vault.rk_id) }, key, b64d(vault.ct));
+  const obj = JSON.parse(dec8(raw));
+  if (obj.id !== vault.rk_id) throw new Error('mismatch');
+  return obj;   // { v, id, priv: JWK }
+}
+
+async function backupStatus() {
+  const { data, error } = await sb.from('e2ee_backups').select('rk_id, rk_pub, salt, iters, iv, ct, updated_at').maybeSingle();
+  if (error) throw error;
+  return data || null;
+}
+
+async function enableBackup(pass) {
+  if (!(await e2eeInit())) throw new Error('unsupported');
+  const v = await makeBackupVault(pass);
+  const { error } = await sb.rpc('set_e2ee_backup', { p_rk_id: v.rkId, p_pub: v.pub, p_salt: v.salt, p_iters: v.iters, p_iv: v.iv, p_ct: v.ct });
+  if (error) throw error;
+  E2EE.cache = {};   // ให้รอบถัดไปดึงกุญแจใหม่ (รวมกุญแจกู้คืน) มาใช้เข้ารหัส
+  return v;
+}
+
+// ใส่กุญแจกู้คืนเข้าไปในข้อความเก่า (เฉพาะข้อความที่เครื่องนี้ถอดได้และยังไม่มี) ทีละชุด 100 ข้อความ
+async function syncBackupHistory(onProgress) {
+  const b = await backupStatus();
+  if (!b) throw new Error('no_backup');
+  await e2eeInit();
+  const target = { device_key: b.rk_id, pub: b.rk_pub };
+  const PAGE = 200;
+  let from = 0, scanned = 0, added = 0, skipped = 0, batch = [];
+  const flush = async () => {
+    if (!batch.length) return;
+    const { data, error } = await sb.rpc('append_enc_keys', { p_items: batch });
+    if (error) throw error;
+    added += data || 0;
+    batch = [];
+  };
+  while (true) {
+    const { data, error } = await sb.from('messages').select('id, enc').not('enc', 'is', null)
+      .order('created_at', { ascending: false }).range(from, from + PAGE - 1);
+    if (error) throw error;
+    if (!data || !data.length) break;
+    for (const row of data) {
+      scanned++;
+      if ((row.enc.k || []).some(x => x.d === b.rk_id)) { skipped++; continue; }
+      try {
+        const raw = await e2eeUnwrap(row.enc, e2eeCands());
+        batch.push({ id: row.id, entry: await wrapCekFor(raw, target) });
+      } catch (e) { /* เครื่องนี้ถอดข้อความนี้ไม่ได้ ข้ามไป */ }
+      if (batch.length >= 100) await flush();
+    }
+    from += PAGE;
+    if (onProgress) onProgress({ scanned, added, skipped });
+    if (data.length < PAGE || scanned >= 5000) break;
+  }
+  await flush();
+  if (onProgress) onProgress({ scanned, added, skipped, done: true });
+  return { scanned, added, skipped };
+}
+
+async function restoreBackup(pass) {
+  const b = await backupStatus();
+  if (!b) throw new Error('no_backup');
+  let obj;
+  try { obj = await unsealBackup(b, pass); } catch (e) { throw new Error('wrong_pass'); }
+  await e2eeInit();
+  const priv = await crypto.subtle.importKey('jwk', obj.priv, ECDH_ALG, false, ['deriveBits']);   // นำเข้าแบบดึงออกไม่ได้
+  await idbSet('rk:' + currentUser.id, { id: obj.id, priv });
+  E2EE.extra = [{ id: obj.id, priv }];
+  let n = 0;   // ถอดข้อความที่เคยถอดไม่ได้ใหม่ (ถ้ากุญแจกู้คืนมีรายการให้)
+  for (const cid in state.messages) {
+    for (const m of state.messages[cid]) if (m.enc && m.decFail) { m.dec = false; m.decFail = false; queueDecrypt(cid, m); n++; }
+  }
+  return n;
+}
+
+async function changeBackupPass(oldPass, newPass) {
+  const b = await backupStatus();
+  if (!b) throw new Error('no_backup');
+  let obj;
+  try { obj = await unsealBackup(b, oldPass); } catch (e) { throw new Error('wrong_pass'); }
+  const sealed = await sealBackup(newPass, b.rk_id, obj.priv, PBKDF2_ITERS);
+  const { error } = await sb.rpc('set_e2ee_backup', { p_rk_id: b.rk_id, p_pub: b.rk_pub, p_salt: sealed.salt, p_iters: sealed.iters, p_iv: sealed.iv, p_ct: sealed.ct });
+  if (error) throw error;
+}
+
+async function removeBackup() {
+  const { error } = await sb.rpc('remove_e2ee_backup');
+  if (error) throw error;
+  try { await idbSet('rk:' + currentUser.id, null); } catch (e) { /* ไม่เป็นไร */ }
+  E2EE.extra = [];
+  E2EE.cache = {};
+}
+
+function passProblem(p) {
+  if (p.length < 10) return 'รหัสสำรองต้องยาวอย่างน้อย 10 ตัวอักษร';
+  if (/^(.)\1+$/.test(p)) return 'รหัสสำรองง่ายเกินไป';
+  if (new Set(p).size < 5) return 'รหัสสำรองต้องมีตัวอักษรหลากหลายกว่านี้';
+  return '';
+}
+
+// ---------- หน้าจอจัดการ ----------
+function bkShow(which) {
+  ['bk-loading', 'bk-off', 'bk-on'].forEach(id => $(id).classList.toggle('hidden-element', id !== which));
+}
+
+async function openBackup() {
+  openModal('backup-modal');
+  bkShow('bk-loading');
+  $('bk-progress').textContent = '';
+  ['bk-pass1', 'bk-pass2', 'bk-pass-r', 'bk-old', 'bk-new'].forEach(id => { $(id).value = ''; });
+  await renderBackup();
+}
+
+async function renderBackup() {
+  try {
+    await e2eeInit();
+    const b = await backupStatus();
+    if (!b) { bkShow('bk-off'); return; }
+    const haveRk = E2EE.extra.some(x => x.id === b.rk_id);
+    $('bk-status').textContent = '✓ เปิดการสำรองอยู่ · ตั้งไว้เมื่อ ' + new Date(b.updated_at).toLocaleString('th-TH', { dateStyle: 'medium', timeStyle: 'short' }) +
+      (haveRk ? ' · เครื่องนี้กู้คืนแล้ว' : '');
+    $('bk-restore-box').classList.toggle('hidden-element', haveRk);
+    bkShow('bk-on');
+  } catch (e) {
+    bkShow('bk-off');
+    toast('โหลดสถานะการสำรองไม่ได้ (ยังไม่ได้รัน SQL ของเฟสนี้หรือเปล่า)', 'error');
+  }
+}
+
+function bkBusy(on, text) {
+  ['bk-enable', 'bk-sync', 'bk-restore', 'bk-change', 'bk-remove'].forEach(id => { const b = $(id); if (b) b.disabled = on; });
+  if (text !== undefined) $('bk-progress').textContent = text;
+}
+
+async function bkEnable() {
+  const p1 = $('bk-pass1').value, p2 = $('bk-pass2').value;
+  const bad = passProblem(p1);
+  if (bad) return toast(bad, 'error');
+  if (p1 !== p2) return toast('รหัสสำรองสองช่องไม่ตรงกัน', 'error');
+  const ok = await confirmDialog('เปิดการสำรองกุญแจ',
+    'ถ้าลืมรหัสสำรอง จะกู้คืนไม่ได้เลย ไม่มีใครช่วยได้ (รวมถึงผู้ดูแลระบบ) ควรจดไว้ในที่ปลอดภัย\n\n' +
+    'การเปิดสำรองจะทำให้ "รหัสความปลอดภัย" ของห้องลับของคุณเปลี่ยน เพื่อนจะเห็นคำเตือนและควรเทียบรหัสกันใหม่\n\n' +
+    'ผู้ที่เข้าถึงฐานข้อมูลอาจลองเดารหัสสำรองแบบออฟไลน์ได้ ยิ่งรหัสยาวและเดายาก ยิ่งปลอดภัย', 'เปิดการสำรอง');
+  if (!ok) return;
+  bkBusy(true, 'กำลังสร้างกุญแจกู้คืนและล็อกด้วยรหัสสำรอง…');
+  try {
+    await enableBackup(p1);
+    bkBusy(true, 'กำลังใส่กุญแจกู้คืนเข้าไปในข้อความลับเก่า…');
+    const r = await syncBackupHistory(p => { $('bk-progress').textContent = `ตรวจแล้ว ${p.scanned} ข้อความ เพิ่มให้ ${p.added}`; });
+    bkBusy(false, '');
+    toast(`เปิดการสำรองแล้ว (ข้อความเก่าที่รวมเข้าสำรอง ${r.added} ข้อความ)`, 'success');
+    await renderBackup();
+    if (activeChat) applySecretUI(activeChat);
+  } catch (e) {
+    bkBusy(false, '');
+    handleDbError(e);
+  }
+}
+
+async function bkSync() {
+  bkBusy(true, 'กำลังตรวจข้อความลับเก่า…');
+  try {
+    const r = await syncBackupHistory(p => { $('bk-progress').textContent = `ตรวจแล้ว ${p.scanned} ข้อความ เพิ่มให้ ${p.added}`; });
+    bkBusy(false, `เสร็จแล้ว: ตรวจ ${r.scanned} ข้อความ เพิ่มเข้าสำรอง ${r.added} (มีอยู่แล้ว ${r.skipped}) ข้อความที่เครื่องนี้ถอดไม่ได้จะต้องซิงก์จากเครื่องที่ถอดได้`);
+  } catch (e) { bkBusy(false, ''); handleDbError(e); }
+}
+
+async function bkRestore() {
+  const p = $('bk-pass-r').value;
+  if (!p) return toast('ใส่รหัสสำรองก่อน', 'error');
+  bkBusy(true, 'กำลังปลดล็อก…');
+  try {
+    const n = await restoreBackup(p);
+    bkBusy(false, '');
+    toast(n ? `กู้คืนแล้ว กำลังถอดข้อความลับเก่า ${n} ข้อความ` : 'กู้คืนกุญแจแล้ว ข้อความลับเก่าที่อยู่ในสำรองจะอ่านได้', 'success');
+    await renderBackup();
+  } catch (e) {
+    bkBusy(false, '');
+    toast(e.message === 'wrong_pass' ? 'รหัสสำรองไม่ถูกต้อง' : 'กู้คืนไม่สำเร็จ', 'error');
+  }
+}
+
+async function bkChange() {
+  const o = $('bk-old').value, n = $('bk-new').value;
+  const bad = passProblem(n);
+  if (!o) return toast('ใส่รหัสสำรองเดิมก่อน', 'error');
+  if (bad) return toast(bad, 'error');
+  bkBusy(true, 'กำลังเปลี่ยนรหัสสำรอง…');
+  try {
+    await changeBackupPass(o, n);
+    bkBusy(false, '');
+    $('bk-old').value = ''; $('bk-new').value = '';
+    toast('เปลี่ยนรหัสสำรองแล้ว', 'success');
+    await renderBackup();
+  } catch (e) {
+    bkBusy(false, '');
+    toast(e.message === 'wrong_pass' ? 'รหัสสำรองเดิมไม่ถูกต้อง' : 'เปลี่ยนรหัสไม่สำเร็จ', 'error');
+  }
+}
+
+async function bkRemove() {
+  const ok = await confirmDialog('ปิดการสำรอง', 'กุญแจกู้คืนจะถูกยกเลิก ข้อความลับใหม่จะไม่รวมเข้าสำรองอีก และเครื่องที่ล้างข้อมูลหลังจากนี้จะอ่านข้อความลับเก่าไม่ได้ กล่องสำรองบนเซิร์ฟเวอร์จะถูกลบ กู้คืนย้อนหลังไม่ได้', 'ปิดการสำรอง', true);
+  if (!ok) return;
+  try { await removeBackup(); toast('ปิดการสำรองแล้ว', 'success'); await renderBackup(); }
+  catch (e) { handleDbError(e); }
 }
 
 // ==================== เฟส C: ความเสถียรของแชท ====================
