@@ -172,6 +172,7 @@ async function enterApp(user) {
     e2eeInit();
     loadSecretRooms().then(() => loadChatList());
     loadTranslateSettings();
+    loadGtr();
     checkRingingCalls();
     await loadSocial();
     await loadGroups();
@@ -625,6 +626,7 @@ function addLocal(partnerId, msg) {
   list.push(msg);
   list.sort((a, b) => a.ts - b.ts);
   if (msg.enc && !msg.dec) queueDecrypt(partnerId, msg);
+  if (state.gtr && state.gtr[partnerId]) queueViewerTranslate(partnerId, msg);   // แปลข้อความในกลุ่มให้ตัวเอง (ถ้าเปิดไว้)
   if (typeof watchChatUpdated === 'function') watchChatUpdated(partnerId, msg);
   return true;
 }
@@ -1375,6 +1377,7 @@ function selectChat(chat) {
   loadLive(activeChat);
   loadOpenCall(activeChat);
   applySecretUI(activeChat);
+  primeGroupTranslate(activeChat);
   loadReactions(activeChat);
   refreshLastSeen(activeChat);
   if (window.matchMedia('(min-width: 761px)').matches) $('message-input').focus();
@@ -1623,10 +1626,11 @@ function loadMessages(keepScroll) {
       linkify(text, msg.text);
       bubble.appendChild(text);
     }
-    if (msg.tr && msg.tr.t && msg.kind === 'text') {   // คำแปลอัตโนมัติ แสดงใต้ข้อความ
+    const trText = (msg.tr && msg.tr.t) || (activeChat.isGroup && gtrLang(activeChat.id) ? msg.vtr : '');   // คำแปลอัตโนมัติ (DM: ทั้งสองฝ่ายเห็น / กลุ่ม: เห็นคนเดียว)
+    if (trText && msg.kind === 'text') {
       const tl = document.createElement('div');
       tl.className = 'tr-line';
-      tl.textContent = '🌐 ' + msg.tr.t;
+      tl.textContent = '🌐 ' + trText;
       bubble.appendChild(tl);
     }
 
@@ -2353,6 +2357,7 @@ function openRoomMenu() {
   if (!isSecret(c.id)) {   // น้องโบ๊ะบ๊ะและแปลภาษา ส่งข้อความไปประมวลผลที่ Google จึงใช้ในห้องลับไม่ได้
     add('เรียกน้องโบ๊ะบ๊ะ', openBoRoom);
     if (!c.isGroup && !c.isSaved) add('แปลภาษาอัตโนมัติ', openTranslate);
+    if (c.isGroup) add('แปลข้อความให้ฉัน', openTranslate);
   }
   if (!c.isGroup && !c.isSaved) {
     if (isSecret(c.id)) {
@@ -5976,12 +5981,13 @@ function renderScreen() {
   const chips = $('call-screen-chips');
   const st = s && CALL.screenView && s.remoteScreens.get(CALL.screenView);
   if (!st) {
+    zoomReset();
     box.classList.add('hidden-element');
     v.srcObject = null;
     chips.innerHTML = '';
   } else {
     box.classList.remove('hidden-element');
-    if (v.srcObject !== st) v.srcObject = st;
+    if (v.srcObject !== st) { zoomReset(); v.srcObject = st; }
     v.muted = s.deaf;
     v.play().catch(() => {});
     chips.innerHTML = '';
@@ -6072,6 +6078,7 @@ function openCallUI(s) {
 
 function closeCallUI() {
   releaseWake();
+  zoomReset();
   CALL.qSent = null;
   $('q-menu').classList.add('hidden-element');
   CALL.immersive = false;
@@ -6221,6 +6228,7 @@ function setImmersive(on) {
     showImmExit('แตะสองครั้งเพื่อออกจากเต็มจอ' + (window.innerHeight > window.innerWidth ? ' · หมุนจอเป็นแนวนอนจะเห็นภาพใหญ่ขึ้น' : ''), 3500);
   } else {
     clearTimeout(immTimer);
+    zoomReset();
     $('imm-exit').classList.add('hidden-element');
     try {
       if (document.fullscreenElement && document.exitFullscreen) { const p = document.exitFullscreen(); if (p && p.catch) p.catch(() => {}); }
@@ -6231,8 +6239,14 @@ function setImmersive(on) {
 
 function onImmersiveTap(e) {
   if (!CALL.immersive || (e.target.closest && e.target.closest('#imm-exit'))) return;
+  if (Date.now() - zoom.last < 350) return;   // เพิ่งบีบ/ลากซูม ไม่นับเป็นการแตะ
   const now = Date.now();
-  if (now - immLastTap < 330) { immLastTap = 0; setImmersive(false); return; }
+  if (now - immLastTap < 330) {
+    immLastTap = 0;
+    if (zoom.s > 1) { zoomReset(); return; }   // กำลังซูมอยู่: แตะสองครั้ง = รีเซ็ตซูมก่อน ยังไม่ออกจากเต็มจอ
+    setImmersive(false);
+    return;
+  }
   immLastTap = now;
   showImmExit('ออกจากเต็มจอ', 3000);
 }
@@ -7466,6 +7480,7 @@ function openBoRoom() {
   const c = activeChat;
   if (!c || isSecret(c.id)) return;
   $('bo-room-input').value = '';
+  $('bo-room-ctx').checked = false;
   aiFiles.room = [];
   renderAiFiles('room');
   openModal('bo-room-modal');
@@ -7482,11 +7497,13 @@ async function submitBoRoom(e) {
   const c = activeChat;
   const q = $('bo-room-input').value.trim();
   const files = aiFiles.room.slice();
+  const useCtx = $('bo-room-ctx').checked;
+  const context = useCtx ? collectRoomContext(c) : [];
   if (!c || (!q && !files.length)) return;
   closeModal('bo-room-modal');
   aiTyping(c.id, true);
   try {
-    await invokeAi({ mode: 'room', chat_id: c.id, is_group: !!c.isGroup, question: q, files: files.map(x => ({ name: x.name, mime: x.mime, b64: x.b64, text: x.text })) });
+    await invokeAi({ mode: 'room', chat_id: c.id, is_group: !!c.isGroup, question: q, context, files: files.map(x => ({ name: x.name, mime: x.mime, b64: x.b64, text: x.text })) });
     aiFiles.room = [];
     setTimeout(() => catchUp(false), 1200);   // เผื่อ Realtime ช้า ให้ดึงคำตอบมาเติมแน่ๆ
   } catch (err) {
@@ -7526,10 +7543,14 @@ function buildAiCard(msg) {
   body.className = 'ai-body';
   renderAiText(body, msg.text);
   const names = msg.rmeta && msg.rmeta.files;
-  if (names && names.length) {
+  const ctxN = msg.rmeta && msg.rmeta.ctx;
+  const notes = [];
+  if (names && names.length) notes.push('📎 แนบ: ' + names.join(' · '));
+  if (ctxN) notes.push('📖 น้องอ่านข้อความล่าสุดในห้อง ' + ctxN + ' ข้อความประกอบการตอบ');
+  if (notes.length) {
     const fl = document.createElement('div');
     fl.className = 'ai-files-line';
-    fl.textContent = '📎 แนบ: ' + names.join(' · ');
+    fl.textContent = notes.join('  ·  ');
     card.append(q, fl, head, body);
     return card;
   }
@@ -7553,8 +7574,11 @@ function onTranslateChange() { loadTranslateSettings().then(() => { if (activeCh
 
 function openTranslate() {
   const c = activeChat;
-  if (!c || c.isGroup || c.isSaved || isSecret(c.id)) return;
-  const cur = (state.translate && state.translate[c.id]) || { on: false, my: 'th', peer: 'en' };
+  if (!c || c.isSaved || isSecret(c.id)) return;
+  const group = !!c.isGroup;
+  const cur = group
+    ? { on: !!gtrLang(c.id), my: gtrLang(c.id) || 'th', peer: 'en' }
+    : ((state.translate && state.translate[c.id]) || { on: false, my: 'th', peer: 'en' });
   [['tr-my', cur.my], ['tr-peer', cur.peer]].forEach(([id, val]) => {
     const sel = $(id);
     sel.innerHTML = '';
@@ -7566,7 +7590,13 @@ function openTranslate() {
     });
     sel.value = val;
   });
-  $('tr-peer-name').textContent = nameOf(c);
+  $('tr-title').textContent = group ? 'แปลข้อความในกลุ่มให้ฉัน' : 'แปลภาษาอัตโนมัติ';
+  $('tr-hint').textContent = group
+    ? 'AI จะแปลข้อความของคนอื่นในกลุ่มนี้เป็นภาษาของคุณ แสดงใต้ข้อความ และเห็นเฉพาะคุณคนเดียว (ข้อความที่แปลจะถูกส่งให้ Google Gemini และนับเข้าโควต้าแปลของคุณ)'
+    : 'AI จะแปลข้อความในห้องนี้ให้ คำแปลแสดงใต้ข้อความ และทั้งสองฝ่ายเห็นเหมือนกัน (ข้อความจะถูกส่งให้ Google Gemini แปล)';
+  $('tr-my-label').textContent = group ? 'แปลเป็นภาษา' : 'ภาษาของฉัน';
+  $('tr-peer-box').classList.toggle('hidden-element', group);
+  $('tr-peer-name').textContent = group ? '' : nameOf(c);
   $('tr-off').classList.toggle('hidden-element', !cur.on);
   openModal('tr-modal');
 }
@@ -7574,7 +7604,19 @@ function openTranslate() {
 async function saveTranslate(on) {
   const c = activeChat;
   if (!c) return;
-  const my = $('tr-my').value, peer = $('tr-peer').value;
+  const my = $('tr-my').value;
+  if (c.isGroup) {   // กลุ่ม: แปลให้ตัวเองฝั่งเครื่องนี้ ไม่ต้องใช้ฐานข้อมูล
+    state.gtr = state.gtr || {};
+    if (on) state.gtr[c.id] = my; else delete state.gtr[c.id];
+    saveGtr();
+    (state.messages[c.id] || []).forEach(m => { delete m.vtr; gtq.seen.delete(m.id); });   // เปลี่ยนภาษา/ปิด: ล้างคำแปลเก่า
+    closeModal('tr-modal');
+    if (on) primeGroupTranslate(c);
+    loadMessages(true);
+    toast(on ? 'เปิดแปลข้อความในกลุ่มให้คุณแล้ว คำแปลจะทยอยขึ้นใต้ข้อความ' : 'ปิดการแปลแล้ว', 'success');
+    return;
+  }
+  const peer = $('tr-peer').value;
   if (on && my === peer) return toast('เลือกภาษาของสองฝ่ายให้ต่างกันนะครับ', 'error');
   const { error } = await sb.rpc('set_chat_translate', { p_partner: c.id, p_on: on, p_my_lang: my, p_partner_lang: peer });
   if (error) return handleDbError(error);
@@ -8048,6 +8090,226 @@ async function bkRemove() {
   if (!ok) return;
   try { await removeBackup(); toast('ปิดการสำรองแล้ว', 'success'); await renderBackup(); }
   catch (e) { handleDbError(e); }
+}
+
+// ==================== ซูมภาพสตรีมด้วยนิ้ว (บีบนิ้ว / ลากเลื่อน / ล้อเมาส์) ====================
+const ZOOM_MAX = 5;
+const zoom = { s: 1, tx: 0, ty: 0, pts: new Map(), base: null, last: 0 };
+
+function zoomClampState(z, w, h) {
+  const s = Math.min(ZOOM_MAX, Math.max(1, z.s));
+  if (s === 1) return { s: 1, tx: 0, ty: 0 };
+  return { s, tx: Math.min(0, Math.max(w - w * s, z.tx)), ty: Math.min(0, Math.max(h - h * s, z.ty)) };
+}
+
+// บีบนิ้ว: คงจุดภาพใต้กึ่งกลางนิ้วไว้ที่เดิม ขณะขยาย/ย่อ
+function zoomPinchState(base, mid, ratio, w, h) {
+  const s = Math.min(ZOOM_MAX, Math.max(1, base.s * ratio));
+  const cx = (base.mid.x - base.tx) / base.s;
+  const cy = (base.mid.y - base.ty) / base.s;
+  return zoomClampState({ s, tx: mid.x - cx * s, ty: mid.y - cy * s }, w, h);
+}
+
+// ล้อเมาส์: ซูมรอบตำแหน่งเมาส์
+function zoomWheelState(z, p, deltaY, w, h) {
+  const s = Math.min(ZOOM_MAX, Math.max(1, z.s * Math.exp(-deltaY * 0.0022)));
+  const cx = (p.x - z.tx) / z.s;
+  const cy = (p.y - z.ty) / z.s;
+  return zoomClampState({ s, tx: p.x - cx * s, ty: p.y - cy * s }, w, h);
+}
+
+function zoomBox() {
+  const r = $('call-screen').getBoundingClientRect();
+  return { w: r.width, h: r.height, l: r.left, t: r.top };
+}
+
+function zoomApply() {
+  const v = $('call-screen-video');
+  v.style.transformOrigin = '0 0';
+  v.style.transform = zoom.s === 1 ? '' : `translate(${zoom.tx}px, ${zoom.ty}px) scale(${zoom.s})`;
+  const b = $('zoom-badge');
+  b.textContent = `×${zoom.s.toFixed(1)} · แตะสองครั้งเพื่อรีเซ็ต`;
+  b.classList.toggle('hidden-element', zoom.s === 1);
+}
+
+function zoomReset() {
+  zoom.s = 1; zoom.tx = 0; zoom.ty = 0; zoom.pts.clear(); zoom.base = null;
+  zoomApply();
+}
+
+function zoomPoint(e, box) { return { x: e.clientX - box.l, y: e.clientY - box.t }; }
+
+function zoomStartBase() {
+  const box = zoomBox();
+  const pts = [...zoom.pts.values()];
+  if (pts.length >= 2) {
+    const a = zoomPoint(pts[0], box), b = zoomPoint(pts[1], box);
+    zoom.base = { s: zoom.s, tx: zoom.tx, ty: zoom.ty, dist: Math.hypot(a.x - b.x, a.y - b.y) || 1, mid: { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 }, pinch: true };
+  } else if (pts.length === 1) {
+    const a = zoomPoint(pts[0], box);
+    zoom.base = { s: zoom.s, tx: zoom.tx, ty: zoom.ty, mid: a, x: a.x, y: a.y, pinch: false };
+  } else zoom.base = null;
+}
+
+function onZoomDown(e) {
+  if ($('call-screen').classList.contains('hidden-element')) return;
+  zoom.pts.set(e.pointerId, { clientX: e.clientX, clientY: e.clientY });
+  try { $('call-screen').setPointerCapture(e.pointerId); } catch (err) { /* ไม่เป็นไร */ }
+  zoomStartBase();
+}
+
+function onZoomMove(e) {
+  if (!zoom.pts.has(e.pointerId)) return;
+  zoom.pts.set(e.pointerId, { clientX: e.clientX, clientY: e.clientY });
+  const base = zoom.base;
+  if (!base) return;
+  const box = zoomBox();
+  const pts = [...zoom.pts.values()];
+  if (pts.length >= 2 && base.pinch) {
+    const a = zoomPoint(pts[0], box), b = zoomPoint(pts[1], box);
+    const ratio = (Math.hypot(a.x - b.x, a.y - b.y) || 1) / base.dist;
+    const z = zoomPinchState(base, { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 }, ratio, box.w, box.h);
+    zoom.s = z.s; zoom.tx = z.tx; zoom.ty = z.ty;
+    zoom.last = Date.now();
+    zoomApply();
+  } else if (pts.length === 1 && !base.pinch && zoom.s > 1) {
+    const a = zoomPoint(pts[0], box);
+    const dx = a.x - base.x, dy = a.y - base.y;
+    if (Math.abs(dx) + Math.abs(dy) > 6) zoom.last = Date.now();   // ลากจริง: อย่านับเป็นการแตะ
+    const z = zoomClampState({ s: zoom.s, tx: base.tx + dx, ty: base.ty + dy }, box.w, box.h);
+    zoom.tx = z.tx; zoom.ty = z.ty;
+    zoomApply();
+  }
+}
+
+function onZoomUp(e) {
+  if (!zoom.pts.has(e.pointerId)) return;
+  if (zoom.base && zoom.base.pinch) zoom.last = Date.now();
+  zoom.pts.delete(e.pointerId);
+  zoomStartBase();   // เหลือนิ้วเดียว: เริ่มลากจากตำแหน่งปัจจุบัน ไม่กระโดด
+}
+
+function onZoomWheel(e) {
+  if ($('call-screen').classList.contains('hidden-element')) return;
+  e.preventDefault();
+  const box = zoomBox();
+  const z = zoomWheelState({ s: zoom.s, tx: zoom.tx, ty: zoom.ty }, zoomPoint(e, box), e.deltaY, box.w, box.h);
+  zoom.s = z.s; zoom.tx = z.tx; zoom.ty = z.ty;
+  zoom.last = Date.now();
+  zoomApply();
+}
+
+function setupZoom() {
+  const box = $('call-screen');
+  box.addEventListener('pointerdown', onZoomDown);
+  box.addEventListener('pointermove', onZoomMove);
+  box.addEventListener('pointerup', onZoomUp);
+  box.addEventListener('pointercancel', onZoomUp);
+  box.addEventListener('wheel', onZoomWheel, { passive: false });
+  let zTap = 0;   // แตะสองครั้งที่ภาพ = รีเซ็ตซูม (ใช้ได้ทั้งโหมดปกติและเต็มจอ)
+  box.addEventListener('click', () => {
+    if (Date.now() - zoom.last < 350) return;
+    const n = Date.now();
+    if (n - zTap < 330) { zTap = 0; if (zoom.s > 1) { zoomReset(); zoom.last = Date.now(); } }   // ตั้งเวลาไว้กันตัวจัดการเต็มจอนับเป็นการออก
+    else zTap = n;
+  });
+  window.addEventListener('resize', () => {
+    if (zoom.s === 1) return;
+    const b = zoomBox();
+    const z = zoomClampState({ s: zoom.s, tx: zoom.tx, ty: zoom.ty }, b.w, b.h);
+    zoom.s = z.s; zoom.tx = z.tx; zoom.ty = z.ty;
+    zoomApply();
+  });
+}
+
+// ==================== แปลข้อความในกลุ่ม (แปลให้เฉพาะตัวเอง) ====================
+const gtq = { list: [], running: 0, seen: new Set(), warned: false, refreshTimer: null };
+
+function gtrKey() { return 'darkchat_gtr_' + currentUser.id; }
+function gtcKey() { return 'darkchat_gtc_' + currentUser.id; }
+function loadGtr() { try { state.gtr = JSON.parse(localStorage.getItem(gtrKey()) || '{}'); } catch (e) { state.gtr = {}; } }
+function saveGtr() { try { localStorage.setItem(gtrKey(), JSON.stringify(state.gtr || {})); } catch (e) { /* ไม่เป็นไร */ } }
+function gtrLang(chatId) { return (state.gtr && state.gtr[chatId]) || null; }
+
+function gtCache() {
+  if (!state.gtc) { try { state.gtc = JSON.parse(localStorage.getItem(gtcKey()) || '{}'); } catch (e) { state.gtc = {}; } }
+  return state.gtc;
+}
+
+function gtCachePut(msgId, text) {
+  const c = gtCache();
+  c[msgId] = text;
+  const keys = Object.keys(c);
+  if (keys.length > 400) keys.slice(0, keys.length - 400).forEach(k => delete c[k]);   // เก็บล่าสุด 400 ข้อความ
+  try { localStorage.setItem(gtcKey(), JSON.stringify(c)); } catch (e) { /* ไม่เป็นไร */ }
+}
+
+function viewerTranslatable(msg) {
+  return msg.kind === 'text' && !msg.isMe && !msg.sticker && !msg.enc && typeof msg.text === 'string' && msg.text.trim().length >= 2 && msg.vtr === undefined;
+}
+
+function queueViewerTranslate(chatId, msg) {
+  const lang = gtrLang(chatId);
+  if (!lang || !viewerTranslatable(msg)) return;
+  const cached = gtCache()[lang + ':' + msg.id];
+  if (cached !== undefined) { msg.vtr = cached; return; }
+  if (gtq.seen.has(msg.id)) return;
+  gtq.seen.add(msg.id);
+  gtq.list.push({ chatId, msg, lang });
+  pumpGtq();
+}
+
+function pumpGtq() {
+  while (gtq.running < 2 && gtq.list.length) {
+    const job = gtq.list.shift();
+    gtq.running++;
+    (async () => {
+      try {
+        const out = await invokeAi({ mode: 'translate', text: job.msg.text, to: job.lang });
+        const tr = out.same ? '' : (out.translation || '');
+        job.msg.vtr = tr;
+        gtCachePut(job.lang + ':' + job.msg.id, tr);
+      } catch (e) {
+        gtq.seen.delete(job.msg.id);
+        if (!gtq.warned) { gtq.warned = true; toast('แปลข้อความในกลุ่มไม่สำเร็จ: ' + aiErrorText(e).split('\n')[0], 'error'); }
+        if (/ai_rate_limit|ai_busy|ai_key_invalid|ai_not_/.test((e && e.message) || '')) gtq.list.length = 0;   // โควต้าเต็ม/ตั้งค่าไม่ครบ: หยุดคิวไว้ก่อน
+      } finally {
+        gtq.running--;
+        if (activeChat && activeChat.id === job.chatId) {
+          clearTimeout(gtq.refreshTimer);
+          gtq.refreshTimer = setTimeout(() => loadMessages(true), 250);   // รวมหลายข้อความให้วาดใหม่ครั้งเดียว
+        }
+        pumpGtq();
+      }
+    })();
+  }
+}
+
+// ==================== ให้น้องโบ๊ะบ๊ะอ่านแชทล่าสุดประกอบการตอบ (ผู้ใช้ต้องติ๊กเลือกเอง) ====================
+function collectRoomContext(chat, max) {
+  const n = max || 20;
+  const rows = (state.messages[chat.id] || [])
+    .filter(m => m.kind === 'text' && !m.sticker && !m.enc && typeof m.text === 'string' && m.text.trim() && !(m.expiresAt && m.expiresAt <= Date.now()))
+    .slice(-n)
+    .map(m => ({
+      who: String(m.isMe ? 'ฉัน' : (chat.isGroup ? groupSenderName(chat, m.senderId) : nameOf(chat))).slice(0, 40),
+      text: m.text.trim().slice(0, 300)
+    }));
+  let total = rows.reduce((a, r) => a + r.who.length + r.text.length, 0);
+  while (rows.length > 1 && total > 5500) { const r = rows.shift(); total -= r.who.length + r.text.length; }   // ตัดข้อความเก่าสุดออกจนไม่เกินขนาด
+  return rows;
+}
+
+function primeGroupTranslate(chat) {
+  if (!chat || !chat.isGroup || !gtrLang(chat.id)) return;
+  (state.messages[chat.id] || []).filter(viewerTranslatable).slice(-15).forEach(m => queueViewerTranslate(chat.id, m));
+}
+
+function boRoomPreset(kind) {
+  const t = { sum: 'ช่วยสรุปบทสนทนาล่าสุดในห้องนี้ให้หน่อย', reply: 'ช่วยคิดข้อความตอบกลับข้อความล่าสุดให้ฉันหน่อย (เสนอ 2-3 แบบ)', trans: 'ช่วยแปลข้อความล่าสุดในห้องนี้เป็นภาษาไทย' }[kind];
+  $('bo-room-input').value = t || '';
+  $('bo-room-ctx').checked = true;
+  $('bo-room-input').focus();
 }
 
 // ==================== เฟส C: ความเสถียรของแชท ====================
@@ -8664,6 +8926,7 @@ function setupGlobalListeners() {
   document.addEventListener('paste', onGlobalPaste);
   setupDropZone();
   setupBo();
+  setupZoom();
   $('call-overlay').addEventListener('click', resumeCallPlayback);
   $('call-overlay').addEventListener('click', onImmersiveTap);
   $('call-overlay').addEventListener('click', () => $('q-menu').classList.add('hidden-element'));
