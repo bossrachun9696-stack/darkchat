@@ -1656,3 +1656,35 @@ body[data-mode="glass"] .chat-item-wrap .chat-item[style*="translateX("] {
 /* แก้: ฟอร์มพิมพ์ถามน้องโบ๊ะบ๊ะ (ช่องพิมพ์ต้องกว้าง ปุ่มส่งต้องเล็ก) */
 .bo-form textarea { width: auto; flex: 1 1 0; }
 .bo-form .primary-btn { width: auto; flex: 0 0 auto; padding: 11px 22px; align-self: flex-end; }
+
+
+/* ช่องพิมพ์ถามน้องโบ๊ะบ๊ะ: ใหญ่ขึ้น (อย่างน้อย 2 บรรทัด ขยายได้ถึง 5 บรรทัด) และสีเข้ากับธีม */
+.bo-form textarea {
+  min-height: 52px; max-height: 150px; line-height: 1.45; font-size: 0.95rem;
+  background: var(--input-bg); color: var(--text-main); border: 1px solid var(--border-color);
+}
+.bo-form textarea::placeholder { color: var(--text-muted, rgba(255, 255, 255, 0.6)); }
+.bo-panel { height: min(88vh, 780px); }
+.bo-msgs { min-height: 180px; }
+
+
+/* ช่องพิมพ์ถามน้องในห้อง (แก้: เดิมเป็นกล่องดำสไตล์ของเบราว์เซอร์) */
+#bo-room-input {
+  width: 100%; min-height: 120px; max-height: 40vh; resize: vertical; padding: 12px 14px; border-radius: 16px; font-family: inherit; font-size: 1rem; line-height: 1.5;
+  background: var(--input-bg); color: var(--text-main); border: 1px solid var(--border-color); outline: none;
+}
+#bo-room-input::placeholder { color: var(--text-muted, rgba(255, 255, 255, 0.6)); }
+#bo-room-input:focus, .bo-form textarea:focus { border-color: rgba(255, 255, 255, 0.7); box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.14); }
+
+/* ไฟล์ที่แนบเพื่อถามน้อง */
+.ai-files { display: flex; flex-wrap: wrap; gap: 6px; }
+.ai-files:empty { display: none; }
+.ai-file { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; padding: 4px 6px 4px 4px; border-radius: 12px; font-size: 0.8rem; background: var(--bg-hover); border: 1px solid var(--border-color); }
+.ai-file img { width: 30px; height: 30px; border-radius: 8px; object-fit: cover; }
+.ai-file-ic { width: 30px; height: 30px; display: grid; place-items: center; font-size: 1.1rem; }
+.ai-file-name { max-width: 150px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ai-file button { border: none; background: rgba(255, 255, 255, 0.2); color: inherit; width: 22px; height: 22px; border-radius: 50%; cursor: pointer; font-size: 0.7rem; }
+.bo-attach { flex: 0 0 auto; align-self: flex-end; width: 44px; height: 44px; font-size: 1.15rem; }
+.bo-meta { margin-top: 6px; font-size: 0.7rem; opacity: 0.6; }
+.bo-msg .bo-files-line { font-size: 0.78rem; opacity: 0.85; margin-bottom: 4px; word-break: break-word; }
+.ai-files-line { font-size: 0.78rem; opacity: 0.85; margin: -4px 0 8px; word-break: break-word; }
