@@ -58,6 +58,7 @@ function thaiError(error) {
   if (/rate limit/i.test(msg)) return 'ทำรายการบ่อยเกินไป กรุณารอสักครู่';
   if (/should be different|same as the old/i.test(msg)) return 'รหัสผ่านใหม่ต้องไม่ซ้ำกับรหัสเดิม';
   if (/too_many_new_chats/i.test(msg)) return 'เริ่มแชทกับคนใหม่ได้ไม่เกิน 20 คนต่อวัน';
+  if (/no_partner_key/i.test(msg)) return 'ห้องลับ: เพื่อนยังไม่มีกุญแจ (ให้เพื่อนเปิดแอปเวอร์ชันล่าสุดก่อน)';
   if (/secret_no_key_partner/i.test(msg)) return 'เพื่อนยังไม่ได้เปิดแอปเวอร์ชันใหม่ จึงยังเปิดห้องลับไม่ได้ (ให้เพื่อนเปิดแอปเวอร์ชันล่าสุดก่อน)';
   if (/secret_no_key_me/i.test(msg)) return 'เครื่องนี้ยังไม่มีกุญแจเข้ารหัส ปิดแล้วเปิดแอปใหม่อีกครั้ง';
   if (/secret_required/i.test(msg)) return 'ห้องลับต้องส่งแบบเข้ารหัสเท่านั้น (ลองเปิดแอปใหม่)';
@@ -1982,7 +1983,8 @@ function onMessageUpdate(row) {
     m.editedAt = row.edited_at ? new Date(row.edited_at).getTime() : null;
     m.pinnedAt = row.pinned_at ? new Date(row.pinned_at).getTime() : null;
     m.expiresAt = row.expires_at ? new Date(row.expires_at).getTime() : null;
-    m.media = row.media || null;
+    if (m.enc) { if (row.media && row.media.expired && m.media) m.media.expired = true; }
+    else m.media = row.media || null;
   }
   state.pins = state.pins || {};
   const pins = (state.pins[chatKey] || []).filter(p => p.id !== row.id);
@@ -2758,13 +2760,28 @@ async function deliverMedia(chat, msg) {
       if (p) { thumb = p.blob; w = p.w; h = p.h; dur = p.dur; }
     }
 
+    const secretRoom = !chat.isGroup && isSecret(chat.id);
+    let upMain = main, upThumb = thumb, upMime = mime, secretInfo = null, payloadEnc = null;
+    if (secretRoom) {
+      // ห้องลับ: เข้ารหัสไฟล์ (และภาพตัวอย่าง) ในเครื่องก่อนอัปโหลด กุญแจของไฟล์อยู่ในข้อความที่เข้ารหัส
+      const em = await encryptBlob(main);
+      const et = thumb ? await encryptBlob(thumb) : null;
+      secretInfo = { k: em.k, i: em.i, tk: et ? et.k : null, ti: et ? et.i : null };
+      upMain = em.cipher; upThumb = et ? et.cipher : null; upMime = 'application/octet-stream'; ext = 'bin';
+      payloadEnc = await encryptPayload(chat.id, {
+        t: msg.text || '',
+        m: { type, name, size: main.size, mime, w, h, dur: dur ? Math.round(dur) : null, ...secretInfo },
+        b: msg.batch || null, bn: msg.batchN || null
+      });
+    }
+
     const path = mediaPath(ext);
-    await uploadObject(path, main, mime);
+    await uploadObject(path, upMain, upMime);
     uploaded.push(path);
     let thumbPath = null;
-    if (thumb) {
-      thumbPath = path.replace(/\.[a-z0-9]+$/, '') + '_t.jpg';
-      await uploadObject(thumbPath, thumb, 'image/jpeg');
+    if (upThumb) {
+      thumbPath = path.replace(/\.[a-z0-9]+$/, '') + (secretRoom ? '_t.bin' : '_t.jpg');
+      await uploadObject(thumbPath, upThumb, secretRoom ? 'application/octet-stream' : 'image/jpeg');
       uploaded.push(thumbPath);
     }
 
@@ -2775,16 +2792,22 @@ async function deliverMedia(chat, msg) {
     const { data, error } = await sb.from('messages').insert({
       sender_id: currentUser.id,
       ...(chat.isGroup ? { group_id: chat.id } : { receiver_id: chat.id }),
-      text: msg.text || '',
-      media,
-      ...(msg.batch ? { meta: { batch: msg.batch, n: msg.batchN || 2 } } : {}),
+      text: secretRoom ? SECRET_TEXT : (msg.text || ''),
+      media: secretRoom ? { type: 'enc', path, thumb: thumbPath, size: upMain.size, thumb_size: upThumb ? upThumb.size : 0 } : media,
+      ...(secretRoom ? { enc: payloadEnc } : (msg.batch ? { meta: { batch: msg.batch, n: msg.batchN || 2 } } : {})),
       ...(msg.ttl ? { ttl_seconds: msg.ttl } : {})
     }).select().single();
     if (error) throw error;
 
     if (msg.media.local) URL.revokeObjectURL(msg.media.local);
     state.messages[chat.id] = (state.messages[chat.id] || []).filter(m => m.id !== msg.id);
-    addLocal(chat.id, toLocal(data));
+    const local = toLocal(data);
+    if (secretRoom) {   // ข้อความของเราเอง: เก็บรายละเอียดจริงไว้แสดงได้ทันที
+      local.text = msg.text || ''; local.dec = true;
+      local.batch = msg.batch || null; local.batchN = msg.batchN || null;
+      local.media = { ...media, secret: secretInfo };
+    }
+    addLocal(chat.id, local);
     // ตรวจพื้นที่: ถ้าใกล้เต็ม เซิร์ฟเวอร์จะลบไฟล์เก่าสุดให้เอง
     sb.functions.invoke('media-cleanup', { body: {} }).then(() => {}, () => {});
   } catch (err) {
@@ -2818,6 +2841,11 @@ function buildMediaEl(msg) {
     wrap.textContent = 'สื่อนี้ถูกลบอัตโนมัติเพื่อประหยัดพื้นที่เซิร์ฟเวอร์';
     return wrap;
   }
+  if (m.type === 'enc') {   // ข้อความลับที่ยังถอดรหัสไม่เสร็จ
+    wrap.classList.add('media-expired');
+    wrap.textContent = '🔒 กำลังถอดรหัสไฟล์…';
+    return wrap;
+  }
 
   if (m.type === 'image' || m.type === 'video') {
     const img = document.createElement('img');
@@ -2827,8 +2855,8 @@ function buildMediaEl(msg) {
     if (m.w && m.h) img.style.aspectRatio = `${m.w} / ${m.h}`;
     img.onerror = () => { img.removeAttribute('src'); wrap.classList.add('no-poster'); };
     if (m.local) img.src = m.local;
-    else if (m.thumb) getMediaUrl(m.thumb).then(u => { if (u) img.src = u; });
-    else if (m.type === 'image') getMediaUrl(m.path).then(u => { if (u) img.src = u; });
+    else if (m.thumb) mediaUrlFor(m, 'thumb').then(u => { if (u) img.src = u; });
+    else if (m.type === 'image') mediaUrlFor(m, 'full').then(u => { if (u) img.src = u; });
     else wrap.classList.add('no-poster');
     wrap.appendChild(img);
     if (m.pending) {
@@ -2849,8 +2877,11 @@ function buildMediaEl(msg) {
     a.preload = 'none';
     a.className = 'media-audio-el';
     a.addEventListener('pointerdown', e => e.stopPropagation()); // เลื่อนแถบเสียงได้โดยไม่เปิดเมนูข้อความ
-    if (!m.pending) getMediaUrl(m.path).then(u => { if (u) a.src = u; });
-    wrap.appendChild(a);
+    if (m.secret && !m.pending) setupSecretAudio(wrap, a, m);   // ห้องลับ: ถอดรหัสตอนกดเล่น
+    else {
+      if (!m.pending) getMediaUrl(m.path).then(u => { if (u) a.src = u; });
+      wrap.appendChild(a);
+    }
   } else {
     const ico = document.createElement('span');
     ico.className = 'media-file-ico';
@@ -2871,10 +2902,11 @@ function buildMediaEl(msg) {
 // บันทึกรูป/วิดีโอ/ไฟล์ลงเครื่อง (iPhone: เปิดแผ่นแชร์ เลือก "บันทึกรูปภาพ/วิดีโอ")
 async function saveMedia(m) {
   toast('กำลังเตรียมไฟล์…', 'info');
-  const url = await getMediaUrl(m.path);
-  if (!url) return toast('ไม่พบไฟล์ (อาจถูกลบอัตโนมัติแล้ว)', 'error');
+  const url = m.secret ? null : await getMediaUrl(m.path);
+  if (!url && !m.secret) return toast('ไม่พบไฟล์ (อาจถูกลบอัตโนมัติแล้ว)', 'error');
   try {
-    const blob = await (await fetch(url)).blob();
+    const blob = m.secret ? await secretBlob(m, 'full') : await (await fetch(url)).blob();
+    if (!blob) return toast('ถอดรหัสไฟล์ไม่ได้ (ไฟล์อาจถูกลบอัตโนมัติแล้ว)', 'error');
     const name = m.name || ('darkchat-' + Date.now());
     const file = new File([blob], name, { type: m.mime || blob.type });
     if (navigator.canShare && navigator.canShare({ files: [file] })) {
@@ -2891,7 +2923,7 @@ async function saveMedia(m) {
     toast('บันทึกไฟล์แล้ว', 'success');
   } catch (err) {
     if (err && err.name === 'AbortError') return; // ยกเลิกแผ่นแชร์
-    window.open(url, '_blank');
+    if (url) window.open(url, '_blank');
   }
 }
 
@@ -3088,8 +3120,8 @@ function albumThumb(m) {
   img.loading = 'lazy';
   img.onerror = () => img.removeAttribute('src');
   if (m.local) img.src = m.local;
-  else if (m.thumb) getMediaUrl(m.thumb).then(u => { if (u) img.src = u; });
-  else if (m.type === 'image') getMediaUrl(m.path).then(u => { if (u) img.src = u; });
+  else if (m.thumb) mediaUrlFor(m, 'thumb').then(u => { if (u) img.src = u; });
+  else if (m.type === 'image') mediaUrlFor(m, 'full').then(u => { if (u) img.src = u; });
   return img;
 }
 
@@ -3193,9 +3225,10 @@ async function saveMediaMany(medias) {
   try {
     const files = [];
     for (const m of medias) {
-      const url = await getMediaUrl(m.path);
-      if (!url) continue;
-      const blob = await (await fetch(url)).blob();
+      let blob = null;
+      if (m.secret) blob = await secretBlob(m, 'full');
+      else { const url = await getMediaUrl(m.path); if (url) blob = await (await fetch(url)).blob(); }
+      if (!blob) continue;
       files.push(new File([blob], m.name || ('darkchat-' + Date.now()), { type: m.mime || blob.type }));
     }
     if (!files.length) return toast('ไม่พบไฟล์ (อาจถูกลบอัตโนมัติแล้ว)', 'error');
@@ -3247,13 +3280,13 @@ function loadSlide(i) {
   const m = gal.items[i];
   if (!slide || !m || slide.dataset.loaded) return;
   slide.dataset.loaded = '1';
-  getMediaUrl(m.path).then(u => {
+  mediaUrlFor(m, 'full').then(u => {
     if (!u) { slide.textContent = 'ไม่พบไฟล์ (อาจถูกลบอัตโนมัติแล้ว)'; return; }
     slide.textContent = '';
     if (m.type === 'video') {
       const v = document.createElement('video');
       v.src = u; v.controls = true; v.playsInline = true; v.className = 'mv-video';
-      if (m.thumb) getMediaUrl(m.thumb).then(p => { if (p) v.poster = p; });
+      if (m.thumb) mediaUrlFor(m, 'thumb').then(p => { if (p) v.poster = p; });
       slide.appendChild(v);
     } else {
       const img = document.createElement('img');
@@ -6738,10 +6771,20 @@ async function decryptMsg(m) {
     const obj = await e2eeDecrypt(m.enc, E2EE.priv, E2EE.keyId, m.encFrom, m.encTo);
     m.text = typeof obj.t === 'string' ? obj.t : '';
     m.sticker = obj.s || null;
+    if (obj.m && m.media) {   // ไฟล์แนบ: ชื่อ ชนิด ขนาด และกุญแจถอดไฟล์ อยู่ในข้อมูลเข้ารหัส
+      const dsc = obj.m;
+      m.media = {
+        type: dsc.type, path: m.media.path, thumb: m.media.thumb, thumb_size: m.media.thumb_size,
+        name: dsc.name, size: dsc.size, mime: dsc.mime, w: dsc.w, h: dsc.h, dur: dsc.dur,
+        expired: !!m.media.expired, secret: { k: dsc.k, i: dsc.i, tk: dsc.tk, ti: dsc.ti }
+      };
+    }
+    if (obj.b) { m.batch = obj.b; m.batchN = obj.bn || 2; }
     m.dec = true;
   } catch (e) {
     m.text = '🔒 ถอดรหัสไม่ได้ (ข้อความนี้ส่งก่อนที่เครื่องนี้จะเข้าร่วม หรือกุญแจเปลี่ยน)';
     m.decFail = true;
+    m.media = null;
     m.dec = true;
   }
 }
@@ -6839,7 +6882,7 @@ async function enableSecretRoom() {
   if (!c || c.isGroup || c.isSaved) return;
   const ok = await confirmDialog('เปิดห้องลับ',
     'ข้อความที่ส่งหลังจากนี้ในห้องนี้จะเข้ารหัสปลายทาง เซิร์ฟเวอร์และเจ้าของระบบอ่านเนื้อหาไม่ได้\n\n' +
-    'ข้อจำกัดของรอบนี้: ส่งได้เฉพาะข้อความและสติ๊กเกอร์ (ยังส่งรูป ไฟล์ เสียง การ์ด และตั้งเวลาส่งไม่ได้) แก้ไข/ปักหมุด/ส่งต่อข้อความไม่ได้ และข้อความเก่าก่อนเปิดห้องลับยังไม่เข้ารหัส\n\n' +
+    'ส่งได้: ข้อความ สติ๊กเกอร์ รูป วิดีโอ ไฟล์ และข้อความเสียง (เข้ารหัสในเครื่องก่อนอัปโหลด) ยังใช้ไม่ได้: การ์ด (โพลล์ นัดหมาย ตำแหน่ง) ตั้งเวลาส่ง แก้ไข ปักหมุด ส่งต่อ และข้อความเก่าก่อนเปิดห้องลับยังไม่เข้ารหัส\n\n' +
     'ถ้าล้างข้อมูลเบราว์เซอร์หรือเปลี่ยนเครื่อง จะอ่านข้อความลับเก่าบนเครื่องนั้นไม่ได้ (กู้คืนไม่ได้)', 'เปิดห้องลับ');
   if (!ok) return;
   if (!(await e2eeInit())) return toast('เบราว์เซอร์นี้ยังเข้ารหัสไม่ได้ หรือสร้างกุญแจไม่สำเร็จ', 'error');
@@ -6893,6 +6936,79 @@ function runSecretSearch(q) {
     card.onclick = () => jumpToMessage(m);
     box.appendChild(card);
   });
+}
+
+// ==================== เฟส F2: ไฟล์แนบในห้องลับ (เข้ารหัสในเครื่องก่อนอัปโหลด) ====================
+// ไฟล์แต่ละไฟล์ (และภาพตัวอย่าง) ถูกเข้ารหัสด้วยกุญแจ AES-256-GCM สุ่มของมันเอง แล้วเก็บกุญแจไว้ "ในข้อความที่เข้ารหัส"
+// เซิร์ฟเวอร์/พื้นที่เก็บไฟล์จึงเห็นแต่ข้อมูลอ่านไม่ออก ชื่อไฟล์ ชนิดไฟล์ และขนาดภาพก็อยู่ในข้อความที่เข้ารหัสด้วย
+const secretCache = new Map();   // ที่อยู่ไฟล์ -> Promise<Blob|null> (ไฟล์ที่ถอดรหัสแล้ว เก็บในหน่วยความจำ)
+const blobUrls = new WeakMap();
+
+async function encryptBlob(blob) {
+  const key = await crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, true, ['encrypt']);
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, await blob.arrayBuffer());
+  const raw = await crypto.subtle.exportKey('raw', key);
+  return { cipher: new Blob([ct], { type: 'application/octet-stream' }), k: b64e(raw), i: b64e(iv) };
+}
+
+async function decryptBuf(buf, kB64, iB64) {
+  const key = await crypto.subtle.importKey('raw', b64d(kB64), 'AES-GCM', false, ['decrypt']);
+  return crypto.subtle.decrypt({ name: 'AES-GCM', iv: b64d(iB64) }, key, buf);
+}
+
+// คืน Blob ของไฟล์ที่ถอดรหัสแล้ว (which = 'thumb' สำหรับภาพตัวอย่าง นอกนั้นคือไฟล์เต็ม)
+function secretBlob(m, which) {
+  const thumb = which === 'thumb';
+  const path = thumb ? m.thumb : m.path;
+  const k = m.secret && (thumb ? m.secret.tk : m.secret.k);
+  const i = m.secret && (thumb ? m.secret.ti : m.secret.i);
+  if (!path || !k) return Promise.resolve(null);
+  if (secretCache.has(path)) return secretCache.get(path);
+  const p = (async () => {
+    const url = await getMediaUrl(path);
+    if (!url) return null;
+    const res = await fetch(url);
+    if (!res.ok) return null;
+    const plain = await decryptBuf(await res.arrayBuffer(), k, i);
+    return new Blob([plain], { type: thumb ? 'image/jpeg' : (m.mime || 'application/octet-stream') });
+  })().catch(() => null);
+  secretCache.set(path, p);
+  p.then(b => { if (!b) secretCache.delete(path); });
+  if (secretCache.size > 60) secretCache.delete(secretCache.keys().next().value);   // เก็บในหน่วยความจำไม่เกิน 60 ไฟล์
+  return p;
+}
+
+function blobUrlOf(b) {
+  let u = blobUrls.get(b);
+  if (!u) { u = URL.createObjectURL(b); blobUrls.set(b, u); }
+  return u;
+}
+
+// URL ที่ใช้แสดงไฟล์ได้: ห้องปกติ = ลิงก์ชั่วคราวของเซิร์ฟเวอร์ / ห้องลับ = ถอดรหัสในเครื่องแล้วเป็น blob URL
+async function mediaUrlFor(m, which) {
+  if (m.secret) { const b = await secretBlob(m, which); return b ? blobUrlOf(b) : null; }
+  const path = which === 'thumb' ? m.thumb : m.path;
+  return path ? getMediaUrl(path) : null;
+}
+
+// เสียงในห้องลับ: ถอดรหัสตอนกดเล่นเท่านั้น (ไม่โหลดทุกคลิปตอนเปิดห้อง)
+function setupSecretAudio(wrap, a, m) {
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'media-secret-play';
+  btn.textContent = '🎤 แตะเพื่อฟัง' + (m.dur ? ` (${Math.floor(m.dur / 60)}:${String(m.dur % 60).padStart(2, '0')})` : '');
+  btn.addEventListener('pointerdown', e => e.stopPropagation());
+  btn.onclick = async e => {
+    e.stopPropagation();
+    btn.textContent = 'กำลังถอดรหัส…';
+    const u = await mediaUrlFor(m, 'full');
+    if (!u) { btn.textContent = 'เปิดไม่ได้ (ไฟล์อาจถูกลบแล้ว)'; return; }
+    a.src = u;
+    btn.replaceWith(a);
+    a.play().catch(() => {});
+  };
+  wrap.appendChild(btn);
 }
 
 // ==================== เฟส C: ความเสถียรของแชท ====================
