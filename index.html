@@ -129,7 +129,15 @@
         </div>
 
         <div class="search-box">
+          <button type="button" id="bo-btn" class="bo-btn" aria-label="คุยกับน้องโบ๊ะบ๊ะ" title="น้องโบ๊ะบ๊ะ ผู้ช่วย AI" onclick="openBoChat()">
+            <img class="bo-img" alt="" onerror="this.classList.add('failed')"><span class="bo-fallback">🤖</span>
+            <span class="bo-dot"></span>
+          </button>
           <input type="search" id="search-input" placeholder="ค้นหาในรายการแชท" oninput="filterChats()">
+          <div id="bo-bubble" class="bo-bubble hidden-element" onclick="openBoChat()">
+            <span id="bo-bubble-text"></span>
+            <button type="button" class="bo-bubble-x" aria-label="ซ่อน" onclick="event.stopPropagation();hideBoBubble(true)">✕</button>
+          </div>
         </div>
 
         <div class="chat-list" id="chat-list"></div>
@@ -167,6 +175,8 @@
         </div>
 
         <div id="friend-banner" class="friend-banner hidden-element"></div>
+
+        <div id="ai-typing" class="ai-typing hidden-element">🤖 น้องโบ๊ะบ๊ะกำลังคิดคำตอบ…</div>
 
         <div id="secret-banner" class="secret-banner hidden-element">
           <span id="secret-banner-text"></span>
@@ -870,6 +880,7 @@
       <span id="mv-name" class="mv-name"></span>
       <span id="mv-count" class="mv-count"></span>
       <button type="button" id="mv-goto" class="chip hidden-element" onclick="gotoFromViewer()">ไปที่ข้อความ</button>
+      <button type="button" id="mv-copy" class="chip hidden-element" onclick="copyCurrentImage()">คัดลอก</button>
       <button type="button" class="chip primary" onclick="saveCurrentMedia()">บันทึก</button>
     </div>
     <div id="mv-stage" class="mv-stage">
@@ -1105,6 +1116,8 @@
 
     <div id="q-menu" class="q-menu hidden-element" onclick="event.stopPropagation()"></div>
 
+    <button type="button" id="imm-chat" class="imm-chat" data-i="chat" aria-label="แสดงข้อความ" onclick="event.stopPropagation();toggleWatchChat()"><span class="ci"></span><b id="imm-chat-badge" class="cbadge hidden-element">0</b></button>
+
     <button type="button" id="imm-exit" class="imm-exit hidden-element" onclick="event.stopPropagation();setImmersive(false)"></button>
 
     <div class="call-controls">
@@ -1139,6 +1152,59 @@
       <div class="modal-actions">
         <button class="secondary-btn" onclick="closeModal('safety-modal')">ปิด</button>
         <button class="primary-btn" onclick="markSafetyVerified()">ตรงกันแล้ว</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- คุยกับน้องโบ๊ะบ๊ะ (ผู้ช่วย AI) -->
+  <div id="bo-modal" class="modal hidden-element" onclick="if(event.target===this)closeBoChat()">
+    <div class="modal-content bo-panel">
+      <div class="bo-head">
+        <div class="bo-avatar"><img class="bo-img" alt="" onerror="this.classList.add('failed')"><span class="bo-fallback">🤖</span></div>
+        <div class="bo-title"><strong>น้องโบ๊ะบ๊ะ</strong><span>ผู้ช่วย AI ของ DarkChat</span></div>
+        <button type="button" class="icon-btn" aria-label="ล้างการสนทนา" title="ล้างการสนทนา" onclick="clearBoChat()">🗑</button>
+        <button type="button" class="icon-btn" aria-label="ปิด" onclick="closeBoChat()">✕</button>
+      </div>
+      <div id="bo-msgs" class="bo-msgs"></div>
+      <div id="bo-chips" class="bo-chips"></div>
+      <form class="bo-form" onsubmit="sendBoMessage(event)">
+        <textarea id="bo-input" rows="1" maxlength="1500" placeholder="พิมพ์ถามน้องโบ๊ะบ๊ะ…"></textarea>
+        <button type="submit" class="primary-btn">ส่ง</button>
+      </form>
+      <span class="hint bo-note">น้องไม่เห็นข้อความแชทของคุณ ข้อความที่พิมพ์ถามน้องจะถูกส่งให้ Google Gemini ประมวลผล</span>
+    </div>
+  </div>
+
+  <!-- ถามน้องโบ๊ะบ๊ะในห้องแชท -->
+  <div id="bo-room-modal" class="modal hidden-element" onclick="if(event.target===this)closeModal('bo-room-modal')">
+    <div class="modal-content">
+      <div class="bo-head">
+        <div class="bo-avatar"><img class="bo-img" alt="" onerror="this.classList.add('failed')"><span class="bo-fallback">🤖</span></div>
+        <div class="bo-title"><strong>เรียกน้องโบ๊ะบ๊ะ</strong><span>ทุกคนในห้องจะเห็นคำถามและคำตอบ</span></div>
+      </div>
+      <form onsubmit="submitBoRoom(event)">
+        <textarea id="bo-room-input" rows="3" maxlength="600" placeholder="พิมพ์คำถามถึงน้อง… เช่น ช่วยแนะนำร้านอาหาร หรือแปลประโยคนี้ให้หน่อย"></textarea>
+        <div class="modal-actions">
+          <button type="button" class="secondary-btn" onclick="closeModal('bo-room-modal')">ยกเลิก</button>
+          <button type="submit" class="primary-btn">ถามน้อง</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- แปลภาษาอัตโนมัติ -->
+  <div id="tr-modal" class="modal hidden-element" onclick="if(event.target===this)closeModal('tr-modal')">
+    <div class="modal-content">
+      <h3>แปลภาษาอัตโนมัติ</h3>
+      <span class="hint" style="margin-top:0">AI จะแปลข้อความในห้องนี้ให้ คำแปลแสดงใต้ข้อความ และทั้งสองฝ่ายเห็นเหมือนกัน (ข้อความจะถูกส่งให้ Google Gemini แปล)</span>
+      <label for="tr-my">ภาษาของฉัน</label>
+      <select id="tr-my"></select>
+      <label for="tr-peer">ภาษาของ <b id="tr-peer-name"></b></label>
+      <select id="tr-peer"></select>
+      <div class="modal-actions">
+        <button type="button" id="tr-off" class="secondary-btn danger hidden-element" onclick="saveTranslate(false)">ปิดการแปล</button>
+        <button type="button" class="secondary-btn" onclick="closeModal('tr-modal')">ยกเลิก</button>
+        <button type="button" class="primary-btn" onclick="saveTranslate(true)">เปิดการแปล</button>
       </div>
     </div>
   </div>
