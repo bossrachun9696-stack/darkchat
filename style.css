@@ -1522,7 +1522,7 @@ body[data-mode="glass"] .chat-item-wrap .chat-item[style*="translateX("] {
 
 
 /* ================= โหมดดูเต็มจอ: ซ่อนปุ่มและไอคอนทั้งหมด เหลือแต่วิดีโอ ================= */
-.call-overlay.immersive :is(.call-topbar, .call-controls, .call-hero, .screen-chips, .watch-float, .call-local, .watch-chat) { display: none !important; }
+.call-overlay.immersive :is(.call-topbar, .call-controls, .call-hero, .screen-chips, .call-local) { display: none !important; }
 .call-overlay.immersive[data-layout="watch"] .call-grid { display: none !important; }
 .call-overlay.immersive :is(.call-name, .call-tile-status) { display: none !important; }
 .call-overlay.immersive .call-screen { inset: 0; background: #000; padding: 0 env(safe-area-inset-right) 0 env(safe-area-inset-left); }
@@ -1572,3 +1572,82 @@ body[data-mode="glass"] .chat-item-wrap .chat-item[style*="translateX("] {
   display: inline-flex; align-items: center; gap: 6px; padding: 10px 16px; border-radius: 999px; cursor: pointer;
   border: 1px solid rgba(255, 255, 255, 0.35); background: rgba(255, 255, 255, 0.14); color: inherit; font-size: 0.86rem;
 }
+
+
+/* ================= การ์ดสายโทร (บอกว่าใครโทรหาใคร) ================= */
+.call-msg .call-info { display: flex; flex-direction: column; gap: 2px; text-align: left; min-width: 0; }
+.call-msg .call-info strong { font-size: 0.9rem; word-break: break-word; }
+.call-msg .call-info span { font-size: 0.78rem; opacity: 0.82; }
+
+/* ลากไฟล์มาวางในแชท */
+.chat-area.drag-over { outline: 3px dashed rgba(255, 255, 255, 0.85); outline-offset: -10px; }
+
+/* โหมดดูสตรีมเต็มจอ: เหลือแค่ปุ่มแสดงข้อความ */
+.imm-chat {
+  display: none; position: absolute; z-index: 30; right: calc(14px + env(safe-area-inset-right)); bottom: calc(18px + env(safe-area-inset-bottom));
+  width: 54px; height: 54px; border-radius: 50%; place-items: center; cursor: pointer; color: #fff;
+  border: 1px solid rgba(255, 255, 255, 0.4); background: rgba(20, 16, 50, 0.6);
+  -webkit-backdrop-filter: blur(14px); backdrop-filter: blur(14px); box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+}
+.call-overlay.immersive .imm-chat { display: grid; }
+.imm-chat .ci svg { width: 24px; height: 24px; }
+.call-overlay.immersive .watch-chat { top: calc(12px + env(safe-area-inset-top)); bottom: calc(84px + env(safe-area-inset-bottom)); z-index: 29; }
+.call-overlay.immersive .watch-float { bottom: calc(24px + env(safe-area-inset-bottom)); right: 84px; left: auto; }
+@media (max-width: 700px) {
+  .call-overlay.immersive .watch-chat { top: auto; height: 52%; }
+}
+
+
+/* ================= น้องโบ๊ะบ๊ะ (AI Assistant) ================= */
+.search-box { position: relative; display: flex; align-items: center; gap: 10px; }
+.search-box input { flex: 1; width: auto; min-width: 0; }
+.bo-btn {
+  position: relative; flex: 0 0 46px; width: 46px; height: 46px; border-radius: 50%; padding: 0; cursor: pointer; overflow: visible;
+  border: 2px solid rgba(255, 255, 255, 0.7); background: rgba(255, 255, 255, 0.18); color: #fff; font-size: 1.4rem;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.28); display: grid; place-items: center;
+}
+.bo-btn .bo-img { position: absolute; inset: 0; width: 100%; height: 100%; border-radius: 50%; object-fit: cover; }
+.bo-dot { position: absolute; right: -1px; bottom: -1px; width: 12px; height: 12px; border-radius: 50%; background: #34d399; border: 2px solid #fff; }
+.bo-img.failed { display: none; }
+.bo-img:not(.failed) ~ .bo-fallback { display: none; }
+.bo-bubble {
+  position: absolute; z-index: 30; left: 8px; top: calc(100% + 4px); max-width: min(260px, 92%); display: flex; align-items: center; gap: 8px;
+  padding: 9px 12px; border-radius: 16px 16px 16px 4px; font-size: 0.86rem; cursor: pointer; color: #fff; animation: rise 0.25s ease both;
+  background: linear-gradient(145deg, rgba(99, 102, 241, 0.96), rgba(168, 85, 247, 0.96)); box-shadow: 0 10px 26px rgba(30, 20, 90, 0.45);
+}
+.bo-bubble-x { border: none; background: rgba(255, 255, 255, 0.22); color: #fff; width: 22px; height: 22px; border-radius: 50%; cursor: pointer; font-size: 0.7rem; flex-shrink: 0; }
+
+.bo-panel { display: flex; flex-direction: column; gap: 8px; width: min(560px, 100%); height: min(86vh, 760px); max-height: 100%; }
+.bo-head { display: flex; align-items: center; gap: 10px; }
+.bo-avatar, .bo-mini { position: relative; flex: 0 0 auto; border-radius: 50%; overflow: hidden; display: grid; place-items: center; background: rgba(255, 255, 255, 0.2); border: 2px solid rgba(255, 255, 255, 0.6); }
+.bo-avatar { width: 48px; height: 48px; font-size: 1.5rem; }
+.bo-mini { width: 32px; height: 32px; font-size: 1rem; align-self: flex-end; }
+.bo-avatar .bo-img, .bo-mini .bo-img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+.bo-title { flex: 1; min-width: 0; display: flex; flex-direction: column; line-height: 1.25; }
+.bo-title span { font-size: 0.76rem; opacity: 0.8; }
+.bo-msgs { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 10px; padding: 6px 2px; }
+.bo-row { display: flex; gap: 8px; align-items: flex-end; max-width: 100%; }
+.bo-row.me { justify-content: flex-end; }
+.bo-msg { max-width: 82%; padding: 9px 13px; border-radius: 18px 18px 18px 4px; font-size: 0.93rem; line-height: 1.5; word-break: break-word; background: var(--bg-hover); border: 1px solid var(--border-color); }
+.bo-row.me .bo-msg { border-radius: 18px 18px 4px 18px; background: linear-gradient(135deg, var(--accent-color, #6366f1), var(--accent-2, #a855f7)); border-color: transparent; color: #fff; white-space: pre-wrap; }
+.bo-msg.err { border-color: #f87171; }
+.bo-msg p { margin: 0 0 6px; }
+.bo-msg p:last-child { margin-bottom: 0; }
+.bo-msg ol, .bo-msg ul, .ai-body ol, .ai-body ul { margin: 4px 0 6px; padding-left: 1.3em; }
+.bo-msg li, .ai-body li { margin: 2px 0; }
+.bo-msg code, .ai-body code { padding: 1px 6px; border-radius: 6px; font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 0.88em; background: rgba(0, 0, 0, 0.22); }
+.bo-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.bo-form { display: flex; gap: 8px; align-items: flex-end; }
+.bo-form textarea { flex: 1; min-width: 0; resize: none; max-height: 120px; padding: 10px 14px; border-radius: 18px; font-family: inherit; outline: none; }
+.bo-note { margin: 0; text-align: center; font-size: 0.72rem; }
+
+.ai-card { align-self: center; width: min(560px, 94%); padding: 10px 14px; border-radius: 18px; margin: 4px 0; background: var(--bg-hover); border: 1px solid var(--border-color); }
+.ai-q { font-size: 0.8rem; opacity: 0.85; margin-bottom: 8px; word-break: break-word; }
+.ai-head { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
+.ai-head .bo-mini { width: 28px; height: 28px; align-self: center; }
+.ai-time { margin-left: auto; font-size: 0.72rem; opacity: 0.7; }
+.ai-body { font-size: 0.92rem; line-height: 1.5; word-break: break-word; }
+.ai-body p { margin: 0 0 6px; }
+.ai-body p:last-child { margin-bottom: 0; }
+.ai-typing { padding: 7px 16px; font-size: 0.84rem; background: color-mix(in srgb, #a855f7 20%, var(--bg-solid)); border-bottom: 1px solid #c084fc; }
+.tr-line { margin-top: 6px; padding-top: 6px; border-top: 1px dashed rgba(255, 255, 255, 0.35); font-size: 0.86rem; opacity: 0.92; word-break: break-word; }
