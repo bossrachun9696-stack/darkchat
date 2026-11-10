@@ -7248,12 +7248,14 @@ function renderAiText(el, text) {
 async function invokeAi(body) {
   const { data, error } = await sb.functions.invoke('ai-assistant', { body });
   if (error) {
-    let code = '';
-    try { const j = await error.context.json(); code = j.error || ''; } catch (e) { /* ไม่เป็นไร */ }
+    let code = '', detail = '';
+    try { const j = await error.context.json(); code = j.error || ''; detail = j.detail || ''; } catch (e) { /* ไม่เป็นไร */ }
     if (!code && error.context && error.context.status === 404) code = 'ai_not_deployed';
-    throw new Error(code || 'ai_failed');
+    const err = new Error(code || 'ai_failed');
+    err.detail = detail || (code ? '' : String(error.message || '').slice(0, 160));
+    throw err;
   }
-  if (data && data.error) throw new Error(data.error);
+  if (data && data.error) { const err = new Error(data.error); err.detail = data.detail || ''; throw err; }
   return data || {};
 }
 
@@ -7262,12 +7264,14 @@ function aiErrorText(err) {
   if (/ai_not_deployed/.test(m)) return 'ยังไม่ได้สร้างฟังก์ชัน ai-assistant บน Supabase ครับ (ดูขั้นตอนตั้งค่า)';
   if (/ai_not_configured/.test(m)) return 'น้องโบ๊ะบ๊ะยังไม่พร้อมใช้งานครับ (ผู้ดูแลระบบยังไม่ได้ตั้งค่า GEMINI_API_KEY)';
   if (/ai_rate_limit/.test(m)) return 'วันนี้ใช้น้องครบโควต้าแล้วครับ พรุ่งนี้มาคุยกันใหม่นะ';
-  if (/ai_busy/.test(m)) return 'ตอนนี้โควต้าฟรีของ Google เต็มชั่วคราว ลองใหม่อีกสักครู่นะครับ';
+  if (/ai_busy/.test(m)) return 'ตอนนี้โควต้าของ Google เต็มชั่วคราว ลองใหม่อีกสักครู่นะครับ' + (err && err.detail ? '\n(รายละเอียดทางเทคนิค: ' + err.detail + ')' : '');
   if (/ai_blocked/.test(m)) return 'ขอโทษครับ น้องตอบเรื่องนี้ไม่ได้ ลองถามด้วยคำอื่นดูนะ';
-  if (/ai_key_invalid/.test(m)) return 'GEMINI_API_KEY ใช้ไม่ได้ ให้ผู้ดูแลระบบตรวจที่ Supabase > Edge Functions > Secrets';
+  const why = err && err.detail ? '\n(รายละเอียดทางเทคนิค: ' + err.detail + ')' : '';
+  if (/ai_key_invalid/.test(m)) return 'GEMINI_API_KEY ใช้ไม่ได้หรือไม่มีสิทธิ์ ให้ผู้ดูแลระบบตรวจที่ Supabase > Edge Functions > Secrets' + why;
+  if (/ai_model_unavailable/.test(m)) return 'รุ่น AI ของ Google ที่ตั้งไว้ใช้ไม่ได้กับคีย์นี้ (ระบบลองรุ่นสำรองแล้วแต่ยังไม่ผ่าน)' + why;
   if (/ai_room_forbidden/.test(m)) return 'ห้องนี้ถามน้องไม่ได้ (เช่น ห้องลับ หรือถูกบล็อก)';
   if (/unauthorized/.test(m)) return 'กรุณาเข้าสู่ระบบใหม่ครับ';
-  return 'น้องขัดข้องชั่วคราวครับ ลองใหม่อีกครั้งนะ';
+  return 'น้องขัดข้องชั่วคราวครับ ลองใหม่อีกครั้งนะ' + why;
 }
 
 // ---------- คุยส่วนตัวกับน้องโบ๊ะบ๊ะ (ประวัติเก็บเฉพาะในเครื่องนี้) ----------
