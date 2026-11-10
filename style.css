@@ -1688,3 +1688,19 @@ body[data-mode="glass"] .chat-item-wrap .chat-item[style*="translateX("] {
 .bo-meta { margin-top: 6px; font-size: 0.7rem; opacity: 0.6; }
 .bo-msg .bo-files-line { font-size: 0.78rem; opacity: 0.85; margin-bottom: 4px; word-break: break-word; }
 .ai-files-line { font-size: 0.78rem; opacity: 0.85; margin: -4px 0 8px; word-break: break-word; }
+
+
+/* ซูมภาพสตรีมด้วยนิ้ว */
+.call-screen { touch-action: none; overflow: hidden; }
+.call-screen video { will-change: transform; }
+.zoom-badge {
+  position: absolute; z-index: 5; top: calc(10px + env(safe-area-inset-top)); left: calc(10px + env(safe-area-inset-left)); pointer-events: none;
+  padding: 6px 12px; border-radius: 999px; font-size: 0.78rem; color: #fff; background: rgba(14, 10, 40, 0.7);
+  -webkit-backdrop-filter: blur(10px); backdrop-filter: blur(10px); border: 1px solid rgba(255, 255, 255, 0.3);
+}
+
+/* ให้น้องโบ๊ะบ๊ะอ่านแชทประกอบ */
+.bo-presets { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
+.bo-ctx { display: flex; align-items: flex-start; gap: 8px; margin: 8px 0 4px; font-size: 0.85rem; cursor: pointer; line-height: 1.4; }
+.bo-ctx input { margin-top: 3px; flex: 0 0 auto; width: 18px; height: 18px; accent-color: #a855f7; }
+.bo-ctx small { display: block; opacity: 0.75; font-size: 0.74rem; }
