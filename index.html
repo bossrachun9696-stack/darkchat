@@ -130,7 +130,7 @@
 
         <div class="search-box">
           <button type="button" id="bo-btn" class="bo-btn" aria-label="คุยกับน้องโบ๊ะบ๊ะ" title="น้องโบ๊ะบ๊ะ ผู้ช่วย AI" onclick="openBoChat()">
-            <img class="bo-img" alt="" onerror="this.classList.add('failed')"><span class="bo-fallback">🤖</span>
+            <img class="bo-img" alt="" onerror="boImgError(this)"><span class="bo-fallback">🤖</span>
             <span class="bo-dot"></span>
           </button>
           <input type="search" id="search-input" placeholder="ค้นหาในรายการแชท" oninput="filterChats()">
@@ -1160,15 +1160,19 @@
   <div id="bo-modal" class="modal hidden-element" onclick="if(event.target===this)closeBoChat()">
     <div class="modal-content bo-panel">
       <div class="bo-head">
-        <div class="bo-avatar"><img class="bo-img" alt="" onerror="this.classList.add('failed')"><span class="bo-fallback">🤖</span></div>
+        <div class="bo-avatar"><img class="bo-img" alt="" onerror="boImgError(this)"><span class="bo-fallback">🤖</span></div>
         <div class="bo-title"><strong>น้องโบ๊ะบ๊ะ</strong><span>ผู้ช่วย AI ของ DarkChat</span></div>
+        <button type="button" id="bo-quality" class="chip" onclick="toggleBoQuality()">⚡ เร็ว</button>
         <button type="button" class="icon-btn" aria-label="ล้างการสนทนา" title="ล้างการสนทนา" onclick="clearBoChat()">🗑</button>
         <button type="button" class="icon-btn" aria-label="ปิด" onclick="closeBoChat()">✕</button>
       </div>
       <div id="bo-msgs" class="bo-msgs"></div>
       <div id="bo-chips" class="bo-chips"></div>
+      <div id="bo-files" class="ai-files"></div>
       <form class="bo-form" onsubmit="sendBoMessage(event)">
-        <textarea id="bo-input" rows="1" maxlength="1500" placeholder="พิมพ์ถามน้องโบ๊ะบ๊ะ…"></textarea>
+        <button type="button" class="icon-btn bo-attach" aria-label="แนบไฟล์" title="แนบรูป / PDF / ไฟล์ข้อความ" onclick="pickAiFiles('bo')">📎</button>
+        <input type="file" id="bo-file" hidden multiple accept="image/*,application/pdf,text/*,.md,.csv,.json,.log,.js,.ts,.py,.html,.css,.xml,.yml,.yaml,.sql" onchange="onAiFilePicked('bo', this)">
+        <textarea id="bo-input" rows="1" maxlength="1500" placeholder="พิมพ์ถามน้องโบ๊ะบ๊ะ… (แนบรูปหรือไฟล์ได้)"></textarea>
         <button type="submit" class="primary-btn">ส่ง</button>
       </form>
       <span class="hint bo-note">น้องไม่เห็นข้อความแชทของคุณ ข้อความที่พิมพ์ถามน้องจะถูกส่งให้ Google Gemini ประมวลผล</span>
@@ -1179,12 +1183,15 @@
   <div id="bo-room-modal" class="modal hidden-element" onclick="if(event.target===this)closeModal('bo-room-modal')">
     <div class="modal-content">
       <div class="bo-head">
-        <div class="bo-avatar"><img class="bo-img" alt="" onerror="this.classList.add('failed')"><span class="bo-fallback">🤖</span></div>
+        <div class="bo-avatar"><img class="bo-img" alt="" onerror="boImgError(this)"><span class="bo-fallback">🤖</span></div>
         <div class="bo-title"><strong>เรียกน้องโบ๊ะบ๊ะ</strong><span>ทุกคนในห้องจะเห็นคำถามและคำตอบ</span></div>
       </div>
       <form onsubmit="submitBoRoom(event)">
-        <textarea id="bo-room-input" rows="3" maxlength="600" placeholder="พิมพ์คำถามถึงน้อง… เช่น ช่วยแนะนำร้านอาหาร หรือแปลประโยคนี้ให้หน่อย"></textarea>
+        <textarea id="bo-room-input" rows="4" maxlength="600" placeholder="พิมพ์คำถามถึงน้อง… เช่น ช่วยแนะนำร้านอาหาร หรือแปลประโยคนี้ให้หน่อย (วางรูปด้วย Ctrl+V หรือกด 📎 เพื่อแนบได้)"></textarea>
+        <div id="bo-room-files" class="ai-files"></div>
+        <input type="file" id="bo-room-file" hidden multiple accept="image/*,application/pdf,text/*,.md,.csv,.json,.log,.js,.ts,.py,.html,.css,.xml,.yml,.yaml,.sql" onchange="onAiFilePicked('room', this)">
         <div class="modal-actions">
+          <button type="button" class="secondary-btn" onclick="pickAiFiles('room')">📎 แนบไฟล์</button>
           <button type="button" class="secondary-btn" onclick="closeModal('bo-room-modal')">ยกเลิก</button>
           <button type="submit" class="primary-btn">ถามน้อง</button>
         </div>
