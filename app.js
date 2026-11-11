@@ -173,6 +173,10 @@ async function enterApp(user) {
     loadSecretRooms().then(() => loadChatList());
     loadTranslateSettings();
     loadGtr();
+    loadEntitlements();
+    loadMyPurchase();
+    loadShopCart();
+    startShopPolling();
     checkRingingCalls();
     await loadSocial();
     await loadGroups();
@@ -767,7 +771,8 @@ const RT_EXTRAS = [
   { table: 'call_streams', events: [['INSERT', p => onStreamChange(p)], ['DELETE', p => onStreamChange(p)]] },
   { table: 'message_reactions', events: [['*', p => onReactionChange(p)]] },
   { table: 'secret_rooms', events: [['*', p => onSecretChange(p)]] },
-  { table: 'chat_translate', events: [['*', p => onTranslateChange(p)]] }
+  { table: 'chat_translate', events: [['*', p => onTranslateChange(p)]] },
+  { table: 'entitlements', events: [['*', p => onEntitlementChange(p)]] }
 ];
 
 function onCoreStatus(status, gen) {
@@ -1378,6 +1383,7 @@ function selectChat(chat) {
   loadOpenCall(activeChat);
   applySecretUI(activeChat);
   primeGroupTranslate(activeChat);
+  setTimeout(pollShop, 1500);   // ตรวจสถานะออเดอร์ที่ยังไม่เสร็จในห้องนี้
   loadReactions(activeChat);
   refreshLastSeen(activeChat);
   if (window.matchMedia('(min-width: 761px)').matches) $('message-input').focus();
@@ -1524,6 +1530,8 @@ function loadMessages(keepScroll) {
     }
     prev = msg;
 
+    if (msg.kind === 'purchase') { container.appendChild(buildPurchaseCard(msg)); return; }
+    if (msg.kind === 'order') { container.appendChild(buildOrderCard(msg)); return; }
     if (msg.kind === 'ai') { container.appendChild(buildAiCard(msg)); return; }
     if (msg.kind === 'call') {
       const cm = document.createElement('div');
@@ -2011,6 +2019,7 @@ function onMessageUpdate(row) {
     m.pinnedAt = row.pinned_at ? new Date(row.pinned_at).getTime() : null;
     m.expiresAt = row.expires_at ? new Date(row.expires_at).getTime() : null;
     m.tr = (row.meta && row.meta.tr) || null;
+    m.rmeta = row.meta || null;   // การ์ด (เช่น สถานะออเดอร์) อัปเดตจากเซิร์ฟเวอร์
     if (m.enc) { if (row.media && row.media.expired && m.media) m.media.expired = true; }
     else m.media = row.media || null;
   }
@@ -2335,38 +2344,52 @@ function openRoomMenu() {
   $('room-menu-title').textContent = nameOf(c);
   const box = $('room-menu-actions');
   box.innerHTML = '';
-  const add = (label, fn, cls) => box.appendChild(actionBtn(label, () => { closeModal('room-menu'); fn(); }, cls || 'secondary-btn'));
+  const GROUPS = {};
+  [['search', '🔎 ค้นหาและข้อความ', true], ['room', '💬 เกี่ยวกับห้องนี้', false], ['look', '🎨 หน้าตาห้อง', false], ['safe', '🔐 ความปลอดภัยและความเป็นส่วนตัว', false], ['ai', '✨ AI และแปลภาษา', false]].forEach(([k, title, open]) => {
+    const det = document.createElement('details');
+    det.className = 'menu-group';
+    det.open = open;
+    const sum = document.createElement('summary');
+    sum.textContent = title;
+    const body = document.createElement('div');
+    body.className = 'menu-group-body';
+    det.append(sum, body);
+    box.appendChild(det);
+    GROUPS[k] = body;
+  });
+  const addG = (g, label, fn, cls) => GROUPS[g].appendChild(actionBtn(label, () => { closeModal('room-menu'); fn(); }, cls || 'secondary-btn'));
 
-  add('ค้นหาข้อความ', openMsgSearch, 'primary-btn');
-  add(c.isGroup ? 'ข้อมูลกลุ่ม' : (c.isSaved ? 'โปรไฟล์ของฉัน' : 'ดูโปรไฟล์'), openChatInfo);
+  addG('search', 'ค้นหาข้อความ', openMsgSearch, 'primary-btn');
+  addG('room', c.isGroup ? 'ข้อมูลกลุ่ม' : (c.isSaved ? 'โปรไฟล์ของฉัน' : 'ดูโปรไฟล์'), openChatInfo);
   if (!c.isSaved) {
-    add(social.pinnedChats.has(c.id) ? 'เลิกปักหมุดแชทนี้' : 'ปักหมุดแชทนี้ไว้บนสุด', () => toggleChatPin(c.id));
-    add(isMuted(c.id) ? 'เปิดเสียงแจ้งเตือนห้องนี้' : 'ปิดเสียงแจ้งเตือนห้องนี้', toggleRoomMute);
+    addG('room', social.pinnedChats.has(c.id) ? 'เลิกปักหมุดแชทนี้' : 'ปักหมุดแชทนี้ไว้บนสุด', () => toggleChatPin(c.id));
+    addG('room', isMuted(c.id) ? 'เปิดเสียงแจ้งเตือนห้องนี้' : 'ปิดเสียงแจ้งเตือนห้องนี้', toggleRoomMute);
   }
-  add('ตั้งเวลาลบข้อความ', openTtlModal);
-  add('ธีมห้องและพื้นหลัง', openRoomStyle);
-  add('ข้อความที่ปักหมุด', openPins);
-  add('สื่อของห้อง (รูป ไฟล์ ลิงก์)', openRoomMedia);
-  add('การเตือนและข้อความตั้งเวลาส่ง', openSchedList);
+  addG('room', 'ตั้งเวลาลบข้อความ', openTtlModal);
+  addG('look', 'ธีมห้องและพื้นหลัง', openRoomStyle);
+  addG('search', 'ข้อความที่ปักหมุด', openPins);
+  addG('search', 'สื่อของห้อง (รูป ไฟล์ ลิงก์)', openRoomMedia);
+  addG('search', 'การเตือนและข้อความตั้งเวลาส่ง', openSchedList);
   if (isRoomLocked(c.id)) {
-    add('เปลี่ยนรหัสล็อกห้อง', () => setRoomCode(c));
-    add('ปิดรหัสล็อกห้อง', () => removeRoomCode(c), 'secondary-btn danger');
+    addG('safe', 'เปลี่ยนรหัสล็อกห้อง', () => setRoomCode(c));
+    addG('safe', 'ปิดรหัสล็อกห้อง', () => removeRoomCode(c), 'secondary-btn danger');
   } else {
-    add('ตั้งรหัสล็อกห้องนี้', () => setRoomCode(c));
+    addG('safe', 'ตั้งรหัสล็อกห้องนี้', () => setRoomCode(c));
   }
   if (!isSecret(c.id)) {   // น้องโบ๊ะบ๊ะและแปลภาษา ส่งข้อความไปประมวลผลที่ Google จึงใช้ในห้องลับไม่ได้
-    add('เรียกน้องโบ๊ะบ๊ะ', openBoRoom);
-    if (!c.isGroup && !c.isSaved) add('แปลภาษาอัตโนมัติ', openTranslate);
-    if (c.isGroup) add('แปลข้อความให้ฉัน', openTranslate);
+    addG('ai', entActive('ai') ? 'เรียกน้องโบ๊ะบ๊ะ' : '🔒 เรียกน้องโบ๊ะบ๊ะ (ต้องมีแพ็กเกจ)', openBoRoom);
+    if (!c.isGroup && !c.isSaved) addG('ai', entActive('ai') ? 'แปลภาษาอัตโนมัติ' : '🔒 แปลภาษาอัตโนมัติ (ต้องมีแพ็กเกจ)', openTranslate);
+    if (c.isGroup) addG('ai', entActive('ai') ? 'แปลข้อความให้ฉัน' : '🔒 แปลข้อความให้ฉัน (ต้องมีแพ็กเกจ)', openTranslate);
   }
   if (!c.isGroup && !c.isSaved) {
     if (isSecret(c.id)) {
-      add('รหัสความปลอดภัย (ห้องลับ)', openSafety);
-      add('ปิดห้องลับ', disableSecretRoom, 'secondary-btn danger');
-    } else add('เปิดห้องลับ (เข้ารหัสปลายทาง)', enableSecretRoom);
+      addG('safe', 'รหัสความปลอดภัย (ห้องลับ)', openSafety);
+      addG('safe', 'ปิดห้องลับ', disableSecretRoom, 'secondary-btn danger');
+    } else addG('safe', 'เปิดห้องลับ (เข้ารหัสปลายทาง)', enableSecretRoom);
   }
   // ห้องลับ: ฟีเจอร์ที่ต้องเก็บเนื้อหาไว้ที่เซิร์ฟเวอร์ใช้ไม่ได้
-  if (isSecret(c.id)) [...box.children].forEach(b => { if (/ข้อความที่ปักหมุด|สื่อของห้อง|เตือนและข้อความตั้งเวลา/.test(b.textContent)) b.remove(); });
+  if (isSecret(c.id)) [...box.querySelectorAll('button')].forEach(b => { if (/ข้อความที่ปักหมุด|สื่อของห้อง|เตือนและข้อความตั้งเวลา/.test(b.textContent)) b.remove(); });
+  [...box.querySelectorAll('details.menu-group')].forEach(g => { if (!g.querySelector('button')) g.remove(); });   // ซ่อนหมวดที่ไม่มีปุ่ม (เช่น ห้องลับ)
   box.appendChild(actionBtn('ปิด', () => closeModal('room-menu')));
   openModal('room-menu');
 }
@@ -5535,6 +5558,7 @@ function callErrorText(e) {
 function streamErrorText(e) {
   const msg = (e && e.message) || '';
   if (/stream_busy/i.test(msg)) return 'มีคนกำลังสตรีมอยู่ในห้องนี้แล้ว';
+  if (/stream_not_entitled/i.test(msg)) { loadEntitlements(); return 'การสตรีมต้องมีแพ็กเกจสตรีม (ผู้ดูไม่ต้องมี)'; }
   if (/unsupported/i.test(msg)) return 'เบราว์เซอร์นี้แชร์หน้าจอไม่ได้ (ใช้ได้บนคอมพิวเตอร์)';
   if (e && (e.name === 'NotAllowedError' || e.name === 'AbortError')) return 'ยกเลิกการแชร์หน้าจอ';
   return thaiError(e);
@@ -6142,6 +6166,7 @@ function toggleCallSpeaker() {
 async function toggleCallShare() {
   const s = CALL.session;
   if (!s) return;
+  if (!s.screen && !entActive('stream')) return needPlan('stream');
   try {
     if (s.screen) await s.stopScreenShare();
     else {
@@ -6444,6 +6469,7 @@ async function startCall(kind) {
 async function startWatchParty() {
   const chat = activeChat;
   if (!chat) return;
+  if (!entActive('stream')) return needPlan('stream');
   if (!canShareScreen()) return toast('การแชร์หน้าจอใช้ได้บนคอมพิวเตอร์เท่านั้น (มือถือเข้ามาดูและคุยด้วยไมค์ได้)', 'info');
   if (!CALL.session) await startCall('audio');
   if (CALL.session && CALL.session.chat.id === chat.id && !CALL.session.screen) toggleCallShare();
@@ -7195,7 +7221,7 @@ const BO_BUBBLES = ['สวัสดีครับ ถามน้องโบ�
 const TR_LANGS = [['th', 'ไทย'], ['en', 'English'], ['zh', '中文'], ['ja', '日本語'], ['ko', '한국어'], ['vi', 'Tiếng Việt'], ['id', 'Bahasa Indonesia'],
   ['ms', 'Bahasa Melayu'], ['fr', 'Français'], ['de', 'Deutsch'], ['es', 'Español'], ['ru', 'Русский'], ['ar', 'العربية'], ['hi', 'हिन्दी'],
   ['lo', 'ລາວ'], ['my', 'မြန်မာ'], ['km', 'ខ្មែរ']];
-const bo = { msgs: [], busy: false, bubbleIdx: 0, bubbleHidden: false };
+const bo = { msgs: [], busy: false, bubbleIdx: 0, bubbleHidden: false, purchases: [], showPlans: false, slipFor: null };
 
 // ---------- รูปน้อง: ไฟล์ "Ai Assistant/1.png" ถึง "14.png" เปลี่ยนรูปทุก 10 นาที ----------
 function boImageIndex() { return (Math.floor(Date.now() / 600000) % BO_IMG_COUNT) + 1; }
@@ -7349,6 +7375,7 @@ function aiErrorText(err) {
   }
   if (/ai_key_invalid/.test(m)) return 'GEMINI_API_KEY ใช้ไม่ได้หรือไม่มีสิทธิ์ ให้ผู้ดูแลระบบตรวจที่ Supabase > Edge Functions > Secrets' + why;
   if (/ai_model_unavailable/.test(m)) return 'รุ่น AI ของ Google ที่ตั้งไว้ใช้ไม่ได้กับคีย์นี้ (ระบบลองรุ่นสำรองแล้วแต่ยังไม่ผ่าน)' + why;
+  if (/ai_not_entitled/.test(m)) return 'ฟีเจอร์นี้ต้องมีแพ็กเกจ AI และแปลภาษา กดปุ่ม 🛒 แพ็กเกจ เพื่อดูและซื้อครับ';
   if (/too_many_files/.test(m)) return 'แนบไฟล์ได้ไม่เกิน 4 ไฟล์ต่อคำถามครับ';
   if (/bad_file/.test(m)) return 'ชนิดไฟล์ที่แนบไม่รองรับ (รองรับรูปภาพ PDF และไฟล์ข้อความ)';
   if (/files_too_big/.test(m)) return 'ไฟล์แนบรวมกันใหญ่เกินไป ลองลดจำนวนหรือใช้ไฟล์เล็กลงนะครับ';
@@ -7361,18 +7388,29 @@ function aiErrorText(err) {
 function boKey() { return 'darkchat_bo_' + currentUser.id; }
 function loadBoHistory() { try { bo.msgs = JSON.parse(localStorage.getItem(boKey()) || '[]').slice(-40); } catch (e) { bo.msgs = []; } }
 function saveBoHistory() {
-  const slim = bo.msgs.filter(m => !m.streaming).slice(-40).map(m => ({ role: m.role, text: m.text, err: m.err, meta: m.meta, files: (m.files || []).map(x => ({ name: x.name, kind: x.kind })) }));
+  // เก็บเฉพาะข้อความ ชื่อไฟล์ และภาพตัวอย่างเล็กๆ ของ 8 ข้อความที่มีรูปล่าสุด (ไม่เก็บตัวรูปเต็ม)
+  const withThumb = new Set(bo.msgs.filter(m => (m.files || []).some(x => x.thumb)).slice(-8));
+  const slim = bo.msgs.filter(m => !m.streaming).slice(-40).map(m => ({
+    role: m.role, text: m.text, err: m.err, meta: m.meta, local: m.local,
+    files: (m.files || []).map(x => ({ name: x.name, kind: x.kind, thumb: withThumb.has(m) ? x.thumb : undefined }))
+  }));
   try { localStorage.setItem(boKey(), JSON.stringify(slim)); } catch (e) { /* ไม่เป็นไร */ }
 }
 
-function openBoChat() {
+async function openBoChat(mode) {
   if (!currentUser) return;
   loadBoHistory();
+  bo.showPlans = mode === 'packages' || !entActive('ai');
   renderBoChat();
   openModal('bo-modal');
   hideBoBubble(false);
   setTimeout(() => $('bo-input').focus(), 150);
+  await loadMyPurchase();
+  loadEntitlements();
+  renderBoChat();
 }
+
+function toggleBoPlans() { bo.showPlans = !bo.showPlans; renderBoChat(); }
 
 function closeBoChat() { closeModal('bo-modal'); }
 
@@ -7381,6 +7419,8 @@ function clearBoChat() {
   saveBoHistory();
   renderBoChat();
 }
+
+function openBoImage(src) { $('bo-lightbox-img').src = src; $('bo-lightbox').classList.remove('hidden-element'); }
 
 function boRow(m) {
   const row = document.createElement('div');
@@ -7401,10 +7441,22 @@ function boRow(m) {
   const b = document.createElement('div');
   b.className = 'bo-msg' + (m.err ? ' err' : '');
   if (m.files && m.files.length) {
-    const fl = document.createElement('div');
-    fl.className = 'bo-files-line';
-    fl.textContent = '📎 ' + m.files.map(x => x.name).join(' · ');
-    b.appendChild(fl);
+    const ths = document.createElement('div');
+    ths.className = 'bo-thumbs';
+    const others = [];
+    m.files.forEach(x => {
+      if (x.kind === 'image' && x.thumb) {   // รูป: โชว์ภาพจริง กดดูขยายได้
+        const im = document.createElement('img');
+        im.className = 'bo-thumb';
+        im.alt = x.name;
+        im.src = x.thumb;
+        im.onclick = () => openBoImage(x.b64 ? 'data:image/jpeg;base64,' + x.b64 : x.thumb);
+        ths.appendChild(im);
+      } else others.push(x.name);
+    });
+    if (ths.children.length) b.appendChild(ths);
+    if (others.length) { const fl = document.createElement('div'); fl.className = 'bo-files-line'; fl.textContent = '📎 ' + others.join(' · '); b.appendChild(fl); }
+    else if (!ths.children.length) { const fl = document.createElement('div'); fl.className = 'bo-files-line'; fl.textContent = '📎 ' + m.files.map(x => x.name).join(' · '); b.appendChild(fl); }
   }
   const body = document.createElement('div');
   if (m.role === 'user') body.textContent = m.text; else renderAiText(body, m.text || 'กำลังพิมพ์…');
@@ -7414,17 +7466,25 @@ function boRow(m) {
   return row;
 }
 
+const BO_SALES_SUGGEST = ['แพ็กเกจแต่ละอันต่างกันยังไง', 'ซื้อแล้วโอนยังไง', 'ใช้ได้กี่วัน นับยังไง'];
+
 function renderBoChat() {
   const box = $('bo-msgs');
   box.innerHTML = '';
+  const hasAi = entActive('ai');
+  $('bo-attach-btn').classList.toggle('hidden-element', !hasAi);
+  $('bo-quality').classList.toggle('hidden-element', !hasAi);
+  if (bo.showPlans) box.appendChild(buildPlanCard());
   if (!bo.msgs.length) {
-    box.appendChild(boRow({ role: 'model', text: 'สวัสดีครับ น้องโบ๊ะบ๊ะเองครับ ผู้ช่วย AI ของ DarkChat\nสอนใช้งานหรือตั้งค่าแอป หรือจะคุยเรื่องอื่นๆ ก็ถามได้เลยครับ' }));
+    box.appendChild(boRow({ role: 'model', text: hasAi
+      ? 'สวัสดีครับ น้องโบ๊ะบ๊ะเองครับ ผู้ช่วย AI ของ DarkChat\nสอนใช้งานหรือตั้งค่าแอป หรือจะคุยเรื่องอื่นๆ ก็ถามได้เลยครับ แนบรูปให้น้องดูก็ได้นะ'
+      : 'สวัสดีครับ น้องโบ๊ะบ๊ะเองครับ\nตอนนี้ยังไม่ได้เปิดแพ็กเกจ AI น้องจึงช่วยเรื่องแพ็กเกจและวิธีซื้อได้เท่านั้นครับ เลือกแพ็กเกจด้านบนได้เลย หรือพิมพ์ถามรายละเอียดก่อนก็ได้ครับ' }));
   }
   bo.msgs.forEach(m => box.appendChild(boRow(m)));
   const chips = $('bo-chips');
   chips.innerHTML = '';
   if (!bo.msgs.length && !bo.busy) {
-    BO_SUGGEST.forEach(t => {
+    (hasAi ? BO_SUGGEST : BO_SALES_SUGGEST).forEach(t => {
       const c = document.createElement('button');
       c.type = 'button';
       c.className = 'chip';
@@ -7433,8 +7493,9 @@ function renderBoChat() {
       chips.appendChild(c);
     });
   }
+  renderSlipBar();
   refreshBoImages();
-  box.scrollTop = box.scrollHeight;
+  box.scrollTop = bo.showPlans && !bo.msgs.length ? 0 : box.scrollHeight;
 }
 
 async function sendBoMessage(e, preset) {
@@ -7442,15 +7503,22 @@ async function sendBoMessage(e, preset) {
   if (bo.busy) return;
   const input = $('bo-input');
   const text = (preset || input.value).trim();
-  const files = aiFiles.bo.slice();
+  const files = entActive('ai') ? aiFiles.bo.slice() : [];
   if (!text && !files.length) return;
   input.value = '';
   input.style.height = 'auto';
   aiFiles.bo = [];
   renderAiFiles('bo');
-  const hist = bo.msgs.filter(m => !m.err && !m.streaming).slice(-19).map(m => ({ role: m.role, text: m.text }));
-  hist.push({ role: 'user', text: text || 'ช่วยดูไฟล์ที่แนบมาให้หน่อย' });
-  bo.msgs.push({ role: 'user', text: text || '(แนบไฟล์)', files: files.map(x => ({ name: x.name, kind: x.kind, thumb: x.thumb })) });
+  // ประวัติที่ส่งให้น้อง: ข้อความเดิม + รูป/ไฟล์ของ 3 ข้อความล่าสุดที่ยังอยู่ในหน่วยความจำ (ถามต่อเรื่องรูปเดิมได้)
+  const toFiles = arr => (arr || []).filter(f => f.b64 || f.text !== undefined).map(f => ({ name: f.name, mime: f.mime, b64: f.b64, text: f.text }));
+  const hist = bo.msgs.filter(m => !m.err && !m.streaming).slice(-19).map(m => {
+    const fl = m.role === 'user' ? toFiles(m.files) : [];
+    return fl.length ? { role: m.role, text: m.text, files: fl } : { role: m.role, text: m.text };
+  });
+  hist.push({ role: 'user', text: text || 'ช่วยดูไฟล์ที่แนบมาให้หน่อย', files: toFiles(files) });
+  bo.msgs.push({ role: 'user', text: text || '(แนบไฟล์)', files: files.map(x => ({ name: x.name, kind: x.kind, thumb: x.thumb, mime: x.mime, b64: x.b64, text: x.text })) });
+  // เก็บตัวรูปในหน่วยความจำเฉพาะ 3 ข้อความล่าสุดที่มีไฟล์ (ประหยัดหน่วยความจำ)
+  bo.msgs.filter(m => (m.files || []).some(x => x.b64 || x.text !== undefined)).slice(0, -3).forEach(m => m.files.forEach(x => { delete x.b64; delete x.text; }));
   const reply = { role: 'model', text: '', streaming: true };
   bo.msgs.push(reply);
   bo.busy = true;
@@ -7459,7 +7527,7 @@ async function sendBoMessage(e, preset) {
   const t0 = Date.now();
   try {
     const out = await streamAi(
-      { mode: 'chat', stream: true, quality: boQuality(), messages: hist, files: files.map(x => ({ name: x.name, mime: x.mime, b64: x.b64, text: x.text })) },
+      { mode: 'chat', stream: true, quality: boQuality(), messages: hist },
       t => { reply.text = t; if (!pending) { pending = true; requestAnimationFrame(() => { pending = false; updateBoLast(reply); }); } }
     );
     reply.text = out.text;
@@ -7469,6 +7537,7 @@ async function sendBoMessage(e, preset) {
   } catch (err) {
     if (reply.text) { reply.text += '\n\n(' + aiErrorText(err).split('\n')[0] + ')'; reply.streaming = false; }
     else { const i = bo.msgs.indexOf(reply); if (i >= 0) bo.msgs.splice(i, 1); bo.msgs.push({ role: 'model', text: aiErrorText(err), err: true }); }
+    if (/ai_not_entitled/.test((err && err.message) || '')) loadEntitlements();
   }
   bo.busy = false;
   saveBoHistory();
@@ -7479,6 +7548,7 @@ async function sendBoMessage(e, preset) {
 function openBoRoom() {
   const c = activeChat;
   if (!c || isSecret(c.id)) return;
+  if (!entActive('ai')) return needPlan('ai');
   $('bo-room-input').value = '';
   $('bo-room-ctx').checked = false;
   aiFiles.room = [];
@@ -7503,6 +7573,11 @@ async function submitBoRoom(e) {
   closeModal('bo-room-modal');
   aiTyping(c.id, true);
   try {
+    const imgs = files.filter(f => f.kind === 'image' && f.b64);
+    if (imgs.length) {   // รูปที่ให้น้องดู: ส่งเข้าห้องเป็นรูปจริง (ทุกคนในห้องเห็น) ก่อนการ์ดคำตอบ
+      const batch = imgs.length > 1 ? newBatchId() : null;
+      for (const f of imgs) await sendMediaFile(new File([b64d(f.b64)], (f.name || 'image').replace(/\.[^.]+$/, '') + '.jpg', { type: 'image/jpeg' }), { caption: '', batch, batchN: imgs.length });
+    }
     await invokeAi({ mode: 'room', chat_id: c.id, is_group: !!c.isGroup, question: q, context, files: files.map(x => ({ name: x.name, mime: x.mime, b64: x.b64, text: x.text })) });
     aiFiles.room = [];
     setTimeout(() => catchUp(false), 1200);   // เผื่อ Realtime ช้า ให้ดึงคำตอบมาเติมแน่ๆ
@@ -7542,10 +7617,13 @@ function buildAiCard(msg) {
   const body = document.createElement('div');
   body.className = 'ai-body';
   renderAiText(body, msg.text);
-  const names = msg.rmeta && msg.rmeta.files;
+  const allNames = (msg.rmeta && msg.rmeta.files) || [];
+  const names = allNames.filter(n => !/\.(jpe?g|png|webp|gif|heic|heif)$/i.test(n));
+  const sentImgs = allNames.length - names.length;
   const ctxN = msg.rmeta && msg.rmeta.ctx;
   const notes = [];
-  if (names && names.length) notes.push('📎 แนบ: ' + names.join(' · '));
+  if (sentImgs) notes.push('🖼 น้องดูรูปที่ส่งไว้ด้านบนแล้ว');
+  if (names.length) notes.push('📎 แนบ: ' + names.join(' · '));
   if (ctxN) notes.push('📖 น้องอ่านข้อความล่าสุดในห้อง ' + ctxN + ' ข้อความประกอบการตอบ');
   if (notes.length) {
     const fl = document.createElement('div');
@@ -7575,6 +7653,7 @@ function onTranslateChange() { loadTranslateSettings().then(() => { if (activeCh
 function openTranslate() {
   const c = activeChat;
   if (!c || c.isSaved || isSecret(c.id)) return;
+  if (!entActive('ai')) return needPlan('ai');
   const group = !!c.isGroup;
   const cur = group
     ? { on: !!gtrLang(c.id), my: gtrLang(c.id) || 'th', peer: 'en' }
@@ -7628,6 +7707,7 @@ async function saveTranslate(on) {
 
 // ส่งข้อความแล้ว ค่อยแปลตามหลัง (ไม่หน่วงการส่ง) แล้วแนบคำแปลให้ทั้งสองฝ่ายเห็น
 async function maybeTranslate(chat, msgId, text) {
+  if (!entActive('ai')) return;
   const t = state.translate && state.translate[chat.id];
   if (!t || !t.on || chat.isGroup || chat.isSaved || isSecret(chat.id) || !text || !msgId) return;
   try {
@@ -7698,7 +7778,7 @@ function blobToB64(blob) {
 }
 
 // ย่อรูปให้ไม่เกิน 1280 พิกเซล เป็น JPEG (เล็กลง ส่งไวขึ้น) + ภาพตัวอย่างเล็กๆ ไว้แสดงในแชท
-async function aiImageToJpeg(file) {
+async function aiImageToJpeg(file, maxSide, quality) {
   let src;
   try { src = await createImageBitmap(file); }
   catch (e) {
@@ -7711,16 +7791,19 @@ async function aiImageToJpeg(file) {
     });
   }
   const w0 = src.width || src.naturalWidth, h0 = src.height || src.naturalHeight;
-  const draw = (max, q) => {
+  let outW = w0, outH = h0;
+  const draw = (max, q, keep) => {
     const k = Math.min(1, max / Math.max(w0, h0));
     const cv = document.createElement('canvas');
     cv.width = Math.max(1, Math.round(w0 * k)); cv.height = Math.max(1, Math.round(h0 * k));
+    if (keep) { outW = cv.width; outH = cv.height; }
     const cx = cv.getContext('2d');
     cx.fillStyle = '#fff'; cx.fillRect(0, 0, cv.width, cv.height);
     cx.drawImage(src, 0, 0, cv.width, cv.height);
     return cv.toDataURL('image/jpeg', q);
   };
-  return { b64: draw(1280, 0.82).split(',')[1], thumb: draw(96, 0.6) };
+  const main = draw(maxSide || 1280, quality || 0.82, true).split(',')[1];
+  return { b64: main, thumb: draw(160, 0.65, false), w: outW, h: outH };
 }
 
 async function aiPrepareFile(file) {
@@ -7741,6 +7824,7 @@ async function aiPrepareFile(file) {
 function aiBytes(list) { return list.reduce((n, f) => n + (f.b64 ? f.b64.length : (f.text || '').length), 0); }
 
 async function addAiFiles(target, files) {
+  if (!entActive('ai')) return needPlan('ai');
   const list = aiFiles[target];
   for (const f of files) {
     if (list.length >= AI_MAX_FILES) { toast(`แนบได้ไม่เกิน ${AI_MAX_FILES} ไฟล์ต่อคำถาม`, 'error'); break; }
@@ -8250,7 +8334,7 @@ function viewerTranslatable(msg) {
 
 function queueViewerTranslate(chatId, msg) {
   const lang = gtrLang(chatId);
-  if (!lang || !viewerTranslatable(msg)) return;
+  if (!lang || !viewerTranslatable(msg) || !entActive('ai')) return;
   const cached = gtCache()[lang + ':' + msg.id];
   if (cached !== undefined) { msg.vtr = cached; return; }
   if (gtq.seen.has(msg.id)) return;
@@ -8310,6 +8394,793 @@ function boRoomPreset(kind) {
   $('bo-room-input').value = t || '';
   $('bo-room-ctx').checked = true;
   $('bo-room-input').focus();
+}
+
+// ==================== เฟส H: ตัวช่วยสั่งอาหาร (เชื่อมเว็บร้านผ่านฟังก์ชัน shop-bridge) ====================
+const SHOP_MENU_KEY = 'darkchat_shop_menu';
+const shop = { menu: null, cart: [], cat: 'all', step: 'menu', ref: null, refSig: '', chatRef: null, chatSig: '', channel: 'online', busy: false, disabled: false, pollTimer: null };
+
+function shopCartKey() { return 'darkchat_cart_' + currentUser.id; }
+function loadShopCart() { try { shop.cart = JSON.parse(localStorage.getItem(shopCartKey()) || '[]'); } catch (e) { shop.cart = []; } }
+function saveShopCart() { try { localStorage.setItem(shopCartKey(), JSON.stringify(shop.cart)); } catch (e) { /* ไม่เป็นไร */ } }
+function shopPref() { try { return JSON.parse(localStorage.getItem('darkchat_shop_pref_' + currentUser.id) || '{}'); } catch (e) { return {}; } }
+function saveShopPref(p) { try { localStorage.setItem('darkchat_shop_pref_' + currentUser.id, JSON.stringify(p)); } catch (e) { /* ไม่เป็นไร */ } }
+
+function newUuid() {
+  if (window.crypto && crypto.randomUUID) return crypto.randomUUID();
+  const h = [...crypto.getRandomValues(new Uint8Array(16))].map(b => b.toString(16).padStart(2, '0')).join('');
+  return `${h.slice(0, 8)}-${h.slice(8, 12)}-4${h.slice(13, 16)}-8${h.slice(17, 20)}-${h.slice(20, 32)}`;
+}
+
+function shopErrorText(err) {
+  const m = (err && err.message) || '';
+  const d = err && err.detail ? err.detail : '';
+  const why = d ? '\n(' + d + ')' : '';
+  if (/shop_not_configured/.test(m)) return 'ยังไม่ได้ตั้งค่าการเชื่อมต่อร้าน ผู้ดูแลระบบต้องตั้ง SHOP_SCRIPT_URL และ SHOP_KEY ที่ Supabase';
+  if (/ai_not_deployed/.test(m)) return 'ยังไม่ได้สร้างฟังก์ชัน shop-bridge บน Supabase';
+  if (/shop_unavailable/.test(m)) return 'ติดต่อเว็บร้านไม่ได้ในตอนนี้' + why;
+  if (/shop_bad_response/.test(m)) return 'เว็บร้านตอบกลับผิดรูปแบบ ตรวจการตั้งค่า Web app ของ Apps Script (Who has access ต้องเป็น Anyone และ Deploy เวอร์ชันล่าสุด)' + why;
+  if (/item_unavailable/.test(m)) return `เมนู "${d || 'บางรายการ'}" หมดแล้ว เอาออกจากตะกร้าแล้วลองใหม่`;
+  if (/invalid_item/.test(m)) return 'มีเมนูที่ร้านไม่มีแล้ว กดรีเฟรชเมนูแล้วเลือกใหม่';
+  if (/table_closed/.test(m)) return 'โต๊ะนี้ยังไม่เปิดหรือปิดไปแล้ว';
+  if (/table_required/.test(m)) return 'เลือกหรือพิมพ์เลขโต๊ะก่อน';
+  if (/name_required/.test(m)) return 'ใส่ชื่อผู้สั่งก่อน';
+  if (/bad_items/.test(m)) return 'รายการอาหารไม่ถูกต้อง (1 ถึง 30 รายการ จำนวน 1 ถึง 50 ต่อรายการ รวมไม่เกิน 200)';
+  if (/order_rate_limit/.test(m)) return 'วันนี้สั่งผ่านแอปครบจำนวนที่กำหนดแล้ว';
+  if (/room_forbidden/.test(m)) return 'ห้องนี้สั่งอาหารไม่ได้ (เช่น ห้องลับ หรือถูกบล็อก)';
+  if (/order_in_progress/.test(m)) return 'กำลังส่งออเดอร์นี้อยู่ รอสักครู่แล้วดูในแชท';
+  if (/chat_post_failed/.test(m)) return (d || 'ออเดอร์เข้าร้านแล้วแต่โพสต์ในแชทไม่สำเร็จ กดส่งอีกครั้งเพื่อโพสต์การ์ด');
+  if (/unauthorized/.test(m)) return 'กรุณาเข้าสู่ระบบใหม่';
+  return 'สั่งอาหารไม่สำเร็จ ลองใหม่อีกครั้ง' + why;
+}
+
+async function callShop(body) {
+  const { data, error } = await sb.functions.invoke('shop-bridge', { body });
+  if (error) { const { status, raw } = await readFnError(error); throw aiErrFromRaw(status, raw, error.message); }
+  if (data && data.error) { const e = new Error(data.error); e.detail = data.detail || ''; throw e; }
+  return data || {};
+}
+
+// ---------- เมนู ----------
+async function loadShopMenu(force) {
+  let cached = null;
+  try { cached = JSON.parse(localStorage.getItem(SHOP_MENU_KEY) || 'null'); } catch (e) { cached = null; }
+  if (!force && cached && cached.menu && Date.now() - cached.at < 5 * 60000) { shop.menu = cached.menu; return { stale: false }; }
+  try {
+    const out = await callShop({ mode: 'menu', refresh: !!force });
+    shop.menu = out.menu;
+    try { localStorage.setItem(SHOP_MENU_KEY, JSON.stringify({ at: Date.now(), menu: out.menu })); } catch (e) { /* ไม่เป็นไร */ }
+    return { stale: !!out.stale };
+  } catch (e) {
+    if (cached && cached.menu) { shop.menu = cached.menu; return { stale: true, error: e }; }   // ติดต่อร้านไม่ได้: ใช้เมนูที่เก็บไว้
+    throw e;
+  }
+}
+
+function shopItem(id) { return shop.menu && shop.menu.items.find(i => i.id === id); }
+function pruneCart() { shop.cart = shop.cart.filter(l => { const it = shopItem(l.id); return it && it.available; }); saveShopCart(); }
+function cartLine(id) { return shop.cart.find(l => l.id === id); }
+function lineUnit(l) {
+  const it = shopItem(l.id);
+  if (!it) return 0;
+  return it.price + (l.option_ids || []).reduce((a, o) => a + ((it.options.find(x => x.id === o) || {}).price || 0), 0);
+}
+function cartEstimate() { return shop.cart.reduce((a, l) => a + lineUnit(l) * l.qty, 0); }
+function cartCount() { return shop.cart.reduce((a, l) => a + l.qty, 0); }
+function fmtBaht(n) { return Number.isInteger(n) ? n.toLocaleString('th-TH') : n.toLocaleString('th-TH', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
+
+function shopAdd(id, d) {
+  const it = shopItem(id);
+  if (!it || !it.available) return;
+  let l = cartLine(id);
+  if (!l) { if (d <= 0) return; l = { id, qty: 0, note: '', option_ids: [] }; shop.cart.push(l); }
+  l.qty = Math.max(0, Math.min(50, l.qty + d));
+  if (l.qty === 0) shop.cart = shop.cart.filter(x => x !== l);
+  saveShopCart();
+  if (shop.step === 'review') { if (!shop.cart.length) { shop.step = 'menu'; shopSetStep(); renderShopMenu(); } else renderShopReview(); }
+  else renderShopMenu();
+  updateShopBar();
+}
+
+// ---------- วาดหน้าเมนู ----------
+function shopSetStep() {
+  $('shop-step-menu').classList.toggle('hidden-element', shop.step !== 'menu');
+  $('shop-step-review').classList.toggle('hidden-element', shop.step !== 'review');
+}
+
+function updateShopBar() {
+  const n = cartCount();
+  $('shop-bar-text').textContent = n ? `${n} จาน · ประมาณ ฿${fmtBaht(cartEstimate())}` : 'ยังไม่ได้เลือกเมนู';
+  $('shop-bar-btn').disabled = !n;
+}
+
+function stepperEl(qty, onMinus, onPlus) {
+  const w = document.createElement('div');
+  w.className = 'shop-step';
+  const mk = (t, fn, label) => { const b = document.createElement('button'); b.type = 'button'; b.textContent = t; b.setAttribute('aria-label', label); b.onclick = e => { e.stopPropagation(); fn(); }; return b; };
+  const q = document.createElement('span');
+  q.textContent = String(qty);
+  w.append(mk('−', onMinus, 'ลด'), q, mk('+', onPlus, 'เพิ่ม'));
+  return w;
+}
+
+function renderShopMenu() {
+  const m = shop.menu;
+  if (!m) return;
+  const chips = $('shop-cats');
+  chips.innerHTML = '';
+  const mkChip = (id, label) => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'chip' + (shop.cat === id ? ' primary' : '');
+    b.textContent = label;
+    b.onclick = () => { shop.cat = id; renderShopMenu(); };
+    chips.appendChild(b);
+  };
+  mkChip('all', 'ทั้งหมด');
+  m.categories.forEach(c => mkChip(c.id, c.name));
+  const q = $('shop-search').value.trim().toLowerCase();
+  const list = $('shop-list');
+  list.innerHTML = '';
+  const items = m.items.filter(i => (shop.cat === 'all' || i.category_id === shop.cat) && (!q || i.name.toLowerCase().includes(q)));
+  if (!items.length) { list.appendChild(hintNode('ไม่พบเมนูที่ค้นหา')); return; }
+  items.forEach(i => {
+    const row = document.createElement('div');
+    row.className = 'shop-item' + (i.available ? '' : ' sold');
+    if (i.image) { const im = document.createElement('img'); im.src = i.image; im.alt = ''; im.loading = 'lazy'; row.appendChild(im); }
+    const info = document.createElement('div');
+    info.className = 'shop-item-info';
+    const nm = document.createElement('strong');
+    nm.textContent = i.name;
+    const pr = document.createElement('span');
+    pr.textContent = i.available ? `฿${fmtBaht(i.price)}` : 'หมด';
+    info.append(nm, pr);
+    row.appendChild(info);
+    const l = cartLine(i.id);
+    if (!i.available) { /* กดสั่งไม่ได้ */ }
+    else if (l) row.appendChild(stepperEl(l.qty, () => shopAdd(i.id, -1), () => shopAdd(i.id, 1)));
+    else {
+      const add = document.createElement('button');
+      add.type = 'button';
+      add.className = 'shop-add';
+      add.textContent = '+ เพิ่ม';
+      add.onclick = () => shopAdd(i.id, 1);
+      row.appendChild(add);
+    }
+    list.appendChild(row);
+  });
+}
+
+async function openShop() {
+  const c = activeChat;
+  if (!c) return;
+  if (isSecret(c.id)) return toast('ห้องลับสั่งอาหารผ่านร้านไม่ได้', 'error');
+  closeAttachMenu();
+  loadShopCart();
+  shop.step = 'menu';
+  shop.cat = 'all';
+  $('shop-search').value = '';
+  $('shop-sub').textContent = c.isGroup ? 'ส่งเข้ากลุ่มนี้และเข้าร้าน' : 'ส่งเข้าแชทนี้และเข้าร้าน';
+  openModal('shop-modal');
+  shopSetStep();
+  const list = $('shop-list');
+  list.innerHTML = '';
+  list.appendChild(hintNode('กำลังโหลดเมนู…'));
+  $('shop-cats').innerHTML = '';
+  updateShopBar();
+  try {
+    const r = await loadShopMenu(false);
+    pruneCart();
+    if (r.stale) toast('ใช้เมนูที่บันทึกไว้ เพราะติดต่อร้านไม่ได้ในตอนนี้', 'info');
+    renderShopMenu();
+    updateShopBar();
+  } catch (e) {
+    list.innerHTML = '';
+    list.appendChild(hintNode(shopErrorText(e)));
+  }
+}
+
+function closeShop() { closeModal('shop-modal'); }
+
+async function shopRefresh() {
+  try {
+    const r = await loadShopMenu(true);
+    pruneCart();
+    if (r.stale) toast('ติดต่อร้านไม่ได้ ใช้เมนูที่บันทึกไว้', 'info'); else toast('อัปเดตเมนูแล้ว', 'success');
+    renderShopMenu();
+    updateShopBar();
+    if (shop.step === 'review') renderShopReview();
+  } catch (e) { toast(shopErrorText(e), 'error'); }
+}
+
+// ---------- ตรวจและส่ง ----------
+function shopReview() {
+  if (!cartCount()) return toast('ยังไม่ได้เลือกเมนู', 'info');
+  const pref = shopPref();
+  shop.step = 'review';
+  shop.channel = activeChat && activeChat.isGroup && pref.channel ? pref.channel : (pref.channel || 'online');
+  $('shop-name').value = pref.name || currentUser.nickname || '';
+  $('shop-note').value = '';
+  $('shop-table-txt').value = pref.table || '';
+  shopSetStep();
+  renderShopReview();
+}
+
+function shopBack() { shop.step = 'menu'; shopSetStep(); renderShopMenu(); updateShopBar(); }
+
+function shopSetChannel(ch) { shop.channel = ch; renderShopReview(); }
+
+function renderShopReview() {
+  const box = $('shop-review-list');
+  box.innerHTML = '';
+  shop.cart.forEach(l => {
+    const it = shopItem(l.id);
+    if (!it) return;
+    const row = document.createElement('div');
+    row.className = 'shop-rline';
+    const top = document.createElement('div');
+    top.className = 'shop-rline-top';
+    const nm = document.createElement('strong');
+    nm.textContent = it.name;
+    const pr = document.createElement('span');
+    pr.textContent = `฿${fmtBaht(lineUnit(l) * l.qty)}`;
+    top.append(nm, pr, stepperEl(l.qty, () => shopAdd(l.id, -1), () => shopAdd(l.id, 1)));
+    row.appendChild(top);
+    if (it.options && it.options.length) {
+      const oc = document.createElement('div');
+      oc.className = 'shop-opts';
+      it.options.forEach(o => {
+        const b = document.createElement('button');
+        b.type = 'button';
+        const on = l.option_ids.includes(o.id);
+        b.className = 'chip' + (on ? ' primary' : '');
+        b.textContent = `${o.name}${o.price ? ' +' + fmtBaht(o.price) : ''}`;
+        b.onclick = () => { l.option_ids = on ? l.option_ids.filter(x => x !== o.id) : [...l.option_ids, o.id]; saveShopCart(); renderShopReview(); updateShopBar(); };
+        oc.appendChild(b);
+      });
+      row.appendChild(oc);
+    }
+    const note = document.createElement('input');
+    note.type = 'text';
+    note.className = 'shop-note-input';
+    note.maxLength = 100;
+    note.placeholder = 'หมายเหตุจานนี้ เช่น ไม่เผ็ด';
+    note.value = l.note || '';
+    note.oninput = () => { l.note = note.value; saveShopCart(); };
+    row.appendChild(note);
+    box.appendChild(row);
+  });
+  $('shop-ch-table').classList.toggle('primary', shop.channel === 'table');
+  $('shop-ch-online').classList.toggle('primary', shop.channel === 'online');
+  $('shop-table-box').classList.toggle('hidden-element', shop.channel !== 'table');
+  const tables = (shop.menu && shop.menu.tables || []).filter(t => t.open);
+  const sel = $('shop-table-sel');
+  sel.innerHTML = '';
+  tables.forEach(t => { const o = document.createElement('option'); o.value = t.id; o.textContent = t.name; sel.appendChild(o); });
+  const pref = shopPref();
+  if (pref.tableId && tables.some(t => t.id === pref.tableId)) sel.value = pref.tableId;
+  sel.classList.toggle('hidden-element', !tables.length);
+  $('shop-table-txt').classList.toggle('hidden-element', tables.length > 0);
+  $('shop-name').placeholder = shop.channel === 'online' ? 'ชื่อผู้สั่ง (ใช้เป็น "สั่งออนไลน์ · ชื่อ")' : 'ชื่อลูกค้า (ไม่บังคับ)';
+  $('shop-total').textContent = `รวมประมาณ ฿${fmtBaht(cartEstimate())} (ราคาจริงให้ร้านคิดตอนส่ง)`;
+  $('shop-offline-hint').classList.add('hidden-element');
+}
+
+function shopPayload() {
+  const tables = (shop.menu && shop.menu.tables || []).filter(t => t.open);
+  const body = {
+    mode: 'order', chat_id: activeChat.id, is_group: !!activeChat.isGroup, channel: shop.channel,
+    customer_name: $('shop-name').value.trim(), note: $('shop-note').value.trim(),
+    items: shop.cart.map(l => ({ id: l.id, qty: l.qty, note: (l.note || '').trim() || undefined, option_ids: l.option_ids.length ? l.option_ids : undefined }))
+  };
+  if (shop.channel === 'table') {
+    if (tables.length) body.table_id = $('shop-table-sel').value;
+    else body.table_name = $('shop-table-txt').value.trim();
+  }
+  return body;
+}
+
+// ข้อความออเดอร์ (รูปแบบเดียวกับที่ฟังก์ชันฝั่งเซิร์ฟเวอร์สร้างให้การ์ด)
+function orderTextFrom(label, lines, note, total) {
+  const rows = lines.map((l, i) => `${i + 1}. ${l.name} ×${l.qty}${l.options && l.options.length ? ' +' + l.options.join(' +') : ''}${l.note ? ` (${l.note})` : ''}`);
+  return [`🍽 ${label}`, ...rows, note ? `หมายเหตุ: ${note}` : '', total !== null ? `รวม ${Number.isInteger(total) ? total : total.toFixed(2)} บาท` : ''].filter(Boolean).join('\n');
+}
+
+function shopLocalText() {
+  const p = shopPayload();
+  const place = p.channel === 'table' ? (p.table_name || (shop.menu.tables.find(t => t.id === p.table_id) || {}).name || 'โต๊ะ') : 'สั่งออนไลน์' + (p.customer_name ? ' · ' + p.customer_name : '');
+  const lines = shop.cart.map(l => { const it = shopItem(l.id); return { name: it.name, qty: l.qty, note: (l.note || '').trim(), options: l.option_ids.map(o => (it.options.find(x => x.id === o) || {}).name).filter(Boolean) }; });
+  return orderTextFrom(`ออเดอร์ · ${place}`, lines, p.note, cartEstimate()) + ' (ประมาณ)';
+}
+
+async function clipCopy(text) {   // คัดลอกแล้วคืน true/false (ไม่แสดงข้อความแจ้งเอง)
+  try { await navigator.clipboard.writeText(text); return true; }
+  catch (e) {
+    try {
+      const ta = document.createElement('textarea');
+      ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
+      document.body.appendChild(ta); ta.select();
+      const ok = document.execCommand('copy');
+      ta.remove();
+      return ok;
+    } catch (e2) { return false; }
+  }
+}
+
+async function shopCopyText() { toast((await clipCopy(shopLocalText())) ? 'คัดลอกข้อความออเดอร์แล้ว' : 'คัดลอกไม่สำเร็จ', 'info'); }
+
+async function shopSend(chatOnly) {
+  if (shop.busy || !activeChat || !cartCount()) return;
+  const body = shopPayload();
+  if (body.channel === 'table' && !body.table_id && !body.table_name) return toast('เลือกหรือพิมพ์เลขโต๊ะก่อน', 'error');
+  if (body.channel === 'online' && !body.customer_name) return toast('ใส่ชื่อผู้สั่งก่อน', 'error');
+  if (chatOnly) {
+    const ok = await confirmDialog('ส่งเข้าแชทอย่างเดียว', 'ร้านจะไม่ได้รับออเดอร์นี้ในระบบ การ์ดในแชทจะติดป้าย "ยังไม่เข้าระบบร้าน" ใช้เมื่อเว็บร้านติดต่อไม่ได้เท่านั้น', 'ส่งเข้าแชท');
+    if (!ok) return;
+    body.chat_only = true;
+  }
+  // รหัสกันซ้ำ: ใช้รหัสเดิมตราบที่ออเดอร์ยังเหมือนเดิม (กดซ้ำ/เน็ตหลุดแล้วลองใหม่จะไม่เกิดออเดอร์ซ้ำ)
+  const sig = JSON.stringify(body);
+  if (chatOnly) { if (sig !== shop.chatSig) { shop.chatRef = newUuid(); shop.chatSig = sig; } body.ref = shop.chatRef; }
+  else { if (sig !== shop.refSig) { shop.ref = newUuid(); shop.refSig = sig; } body.ref = shop.ref; }
+  shop.busy = true;
+  ['shop-send', 'shop-chat-only', 'shop-copy'].forEach(id => { $(id).disabled = true; });
+  try {
+    const out = await callShop(body);
+    const pref = shopPref();
+    saveShopPref({ channel: shop.channel, name: body.customer_name || pref.name || '', table: body.table_name || pref.table || '', tableId: body.table_id || pref.tableId || '' });
+    shop.cart = []; saveShopCart(); shop.ref = null; shop.refSig = ''; shop.chatRef = null; shop.chatSig = '';
+    closeShop();
+    toast(out.order_id ? `ส่งออเดอร์ ${out.order_id} เข้าร้านและแชทแล้ว` : 'ส่งออเดอร์เข้าแชทแล้ว (ยังไม่เข้าระบบร้าน)', out.order_id ? 'success' : 'info');
+    setTimeout(() => catchUp(false), 1200);   // เผื่อ Realtime ช้า ให้ดึงการ์ดมาแสดงแน่ๆ
+  } catch (e) {
+    toast(shopErrorText(e), 'error');
+    if (/shop_unavailable|shop_bad_response/.test(e.message)) $('shop-offline-hint').classList.remove('hidden-element');
+    if (/item_unavailable|invalid_item/.test(e.message)) { try { await loadShopMenu(true); pruneCart(); } catch (x) { /* ไม่เป็นไร */ } shopBack(); }
+  } finally {
+    shop.busy = false;
+    ['shop-send', 'shop-chat-only', 'shop-copy'].forEach(id => { $(id).disabled = false; });
+  }
+}
+
+// ---------- การ์ดออเดอร์ในแชท ----------
+function buildOrderCard(msg) {
+  const m = msg.rmeta || {};
+  const card = document.createElement('div');
+  card.className = 'order-card st-' + (m.status || 'received');
+  const head = document.createElement('div');
+  head.className = 'order-head';
+  const title = document.createElement('strong');
+  title.textContent = '🍽 ' + (m.label || 'ออเดอร์อาหาร');
+  const chip = document.createElement('span');
+  chip.className = 'order-status';
+  chip.textContent = m.status_text || '';
+  head.append(title, chip);
+  card.appendChild(head);
+  const by = document.createElement('div');
+  by.className = 'order-by';
+  by.textContent = 'สั่งโดย ' + (msg.isMe ? 'คุณ' : (activeChat && activeChat.isGroup ? groupSenderName(activeChat, msg.senderId) : (activeChat ? nameOf(activeChat) : '')));
+  card.appendChild(by);
+  const ul = document.createElement('ul');
+  ul.className = 'order-items';
+  (m.items || []).forEach(i => {
+    const li = document.createElement('li');
+    const left = document.createElement('span');
+    left.textContent = `${i.qty}× ${i.name}${i.options && i.options.length ? ' +' + i.options.join(' +') : ''}${i.note ? ' (' + i.note + ')' : ''}`;
+    li.appendChild(left);
+    if (i.line_total) { const r = document.createElement('span'); r.textContent = `฿${fmtBaht(i.line_total)}`; li.appendChild(r); }
+    ul.appendChild(li);
+  });
+  card.appendChild(ul);
+  if (m.note) { const n = document.createElement('div'); n.className = 'order-note'; n.textContent = 'หมายเหตุ: ' + m.note; card.appendChild(n); }
+  if (m.total !== null && m.total !== undefined) { const t = document.createElement('div'); t.className = 'order-total'; t.textContent = `รวม ฿${fmtBaht(Number(m.total))}`; card.appendChild(t); }
+  if (m.offline) { const w = document.createElement('div'); w.className = 'order-warn'; w.textContent = '⚠️ ยังไม่เข้าระบบร้าน (ร้านยังไม่ได้รับออเดอร์นี้)'; card.appendChild(w); }
+  const acts = document.createElement('div');
+  acts.className = 'order-actions';
+  acts.append(chip2('คัดลอกข้อความ', async () => toast((await clipCopy(msg.text)) ? 'คัดลอกข้อความออเดอร์แล้ว' : 'คัดลอกไม่สำเร็จ', 'info')), chip2('สั่งซ้ำ', () => shopReorder(msg)));
+  card.appendChild(acts);
+  return card;
+}
+
+function chip2(label, fn) {
+  const b = document.createElement('button');
+  b.type = 'button';
+  b.className = 'chip';
+  b.textContent = label;
+  b.onclick = fn;
+  return b;
+}
+
+async function shopReorder(msg) {
+  const m = msg.rmeta || {};
+  await openShop();
+  if (!shop.menu) return;
+  let skipped = 0;
+  shop.cart = [];
+  (m.items || []).forEach(i => {
+    const it = i.id && shopItem(i.id);
+    if (!it || !it.available) { skipped++; return; }
+    shop.cart.push({ id: it.id, qty: Math.max(1, Math.min(50, i.qty)), note: i.note || '', option_ids: [] });
+  });
+  saveShopCart();
+  renderShopMenu();
+  updateShopBar();
+  if (skipped) toast(`มี ${skipped} รายการที่ตอนนี้ไม่มีหรือหมด จึงไม่ได้ใส่ให้`, 'info');
+  if (shop.cart.length) shopReview();
+}
+
+// ---------- สถานะออเดอร์ ----------
+function orderIdsToPoll() {
+  if (!activeChat) return [];
+  return (state.messages[activeChat.id] || [])
+    .filter(m => m.kind === 'order' && m.rmeta && !m.rmeta.offline && m.rmeta.order_id && (m.rmeta.status === 'received' || m.rmeta.status === 'preparing'))
+    .slice(-10).map(m => m.rmeta.order_id);
+}
+
+async function pollShop() {
+  if (shop.disabled || document.hidden || !currentUser) return;
+  const ids = orderIdsToPoll();
+  if (!ids.length) return;
+  try {
+    const out = await callShop({ mode: 'status', order_ids: ids });
+    let changed = false;
+    for (const m of (activeChat && state.messages[activeChat.id]) || []) {
+      const s = m.kind === 'order' && m.rmeta && out.statuses && out.statuses[m.rmeta.order_id];
+      if (s && s.status !== m.rmeta.status) { m.rmeta = { ...m.rmeta, status: s.status, status_text: s.status_text }; changed = true; }
+    }
+    if (changed) loadMessages(true);
+  } catch (e) {
+    if (/shop_not_configured|ai_not_deployed/.test((e && e.message) || '')) shop.disabled = true;   // ยังไม่ได้ตั้งค่าร้าน: หยุดถามไปเลย
+  }
+}
+
+function startShopPolling() {
+  clearInterval(shop.pollTimer);
+  shop.pollTimer = setInterval(pollShop, 20000);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) pollShop(); });
+}
+
+// ==================== เฟส J: แพ็กเกจ (AI + แปลภาษา / สตรีม) ====================
+const PRODUCTS = {
+  ai: { icon: '🤖', name: 'AI และแปลภาษา', desc: 'ถามน้องโบ๊ะบ๊ะ แนบรูป/ไฟล์ให้ AI ดู เรียกน้องในห้องแชท และแปลภาษาอัตโนมัติ' },
+  stream: { icon: '📺', name: 'สตรีม', desc: 'แชร์หน้าจอจากคอมพิวเตอร์ให้เพื่อนดู (ผู้ดูไม่ต้องซื้อ ซื้อเฉพาะคนสตรีม)' }
+};
+const PRICES = { monthly: 29, lifetime: 99 };
+const PLAN_NAMES = { monthly: 'รายเดือน (30 วัน)', lifetime: 'ตลอดชีพ' };
+state.ent = null;
+
+async function loadEntitlements() {
+  const { data, error } = await sb.rpc('my_entitlements');
+  if (error || !data) return;   // ยังไม่ได้รัน SQL ของระบบแพ็กเกจ: ไม่ล็อกการใช้งาน
+  state.ent = data;
+  renderEntitlementUI();
+}
+
+function onEntitlementChange() { loadEntitlements(); }
+
+// ยังโหลดสถานะไม่ได้ (หรือยังไม่ได้รัน SQL) = ไม่ล็อก เซิร์ฟเวอร์ตรวจซ้ำอีกชั้นเสมอ
+function entActive(p) { return !state.ent || !!(state.ent[p] && state.ent[p].active); }
+function isAdminUser() { return !!(state.ent && state.ent.is_admin); }
+
+function fmtThaiDate(iso) {
+  const d = new Date(new Date(iso).getTime() - 1000);   // วันสุดท้ายที่ใช้ได้ (วันหมดอายุคือเที่ยงคืนของวันถัดไป)
+  const p = new Intl.DateTimeFormat('th-TH', { timeZone: 'Asia/Bangkok', day: '2-digit', month: '2-digit', year: 'numeric', calendar: 'buddhist' }).format(d);
+  return p;
+}
+
+function entLabel(p) {
+  const e = state.ent && state.ent[p];
+  if (!state.ent) return 'กำลังตรวจสอบ…';
+  if (e && e.admin) return 'แอดมิน ใช้ได้ทุกอย่าง';
+  if (!e || !e.active) return 'ยังไม่เปิดใช้งาน';
+  if (e.lifetime) return 'ตลอดชีพ';
+  return `ใช้ได้ถึง ${fmtThaiDate(e.expires_at)} (เหลือ ${e.days_left} วัน)`;
+}
+
+function renderEntitlementUI() {
+  ['ai', 'stream'].forEach(p => {
+    const el = document.getElementById('ent-' + p + '-status');
+    if (el) {
+      el.textContent = entLabel(p);
+      const e = state.ent && state.ent[p];
+      el.classList.toggle('ent-on', !!(e && e.active));
+      el.classList.toggle('ent-warn', !!(e && e.active && !e.lifetime && e.days_left <= 3));
+    }
+  });
+  const ag = document.getElementById('set-admin-group');
+  if (ag) ag.classList.toggle('hidden-element', !isAdminUser());
+  if (!$('bo-modal').classList.contains('hidden-element')) renderBoChat();
+}
+
+async function needPlan(p) {
+  const pr = PRODUCTS[p];
+  const ok = await confirmDialog(`ต้องมีแพ็กเกจ ${pr.name}`,
+    `${pr.desc}\n\nราคา ${PRICES.monthly} บาทต่อเดือน หรือ ${PRICES.lifetime} บาทตลอดชีพ\nให้น้องโบ๊ะบ๊ะอธิบายและช่วยสั่งซื้อไหม?`, 'ดูแพ็กเกจ');
+  if (ok) openBoChat('packages');
+}
+
+// ---------- แพ็กเกจ/คำขอซื้อในแชทกับน้องโบ๊ะบ๊ะ ----------
+async function loadMyPurchase() {
+  const { data, error } = await sb.from('purchase_requests').select('id, product, plan, price, status, slips')
+    .in('status', ['requested', 'slip_sent']).order('created_at', { ascending: false });
+  if (error) { bo.purchases = []; return; }
+  bo.purchases = data || [];
+}
+
+function buildPlanCard() {
+  const card = document.createElement('div');
+  card.className = 'plan-card';
+  const title = document.createElement('strong');
+  title.textContent = '🛒 แพ็กเกจของ DarkChat';
+  card.appendChild(title);
+  Object.keys(PRODUCTS).forEach(p => {
+    const pr = PRODUCTS[p];
+    const box = document.createElement('div');
+    box.className = 'plan-prod';
+    const h = document.createElement('div');
+    h.className = 'plan-head';
+    const nm = document.createElement('span');
+    nm.textContent = `${pr.icon} ${pr.name}`;
+    const st = document.createElement('span');
+    st.className = 'plan-status' + (entActive(p) && state.ent ? ' ent-on' : '');
+    st.textContent = entLabel(p);
+    h.append(nm, st);
+    const d = document.createElement('div');
+    d.className = 'plan-desc';
+    d.textContent = pr.desc;
+    const row = document.createElement('div');
+    row.className = 'plan-btns';
+    const ent = state.ent && state.ent[p];
+    const has = ent && ent.active && !ent.admin;
+    ['monthly', 'lifetime'].forEach(plan => {
+      if (ent && ent.admin) return;
+      if (has && ent.lifetime) return;   // ตลอดชีพอยู่แล้ว ไม่ต้องซื้อ
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = plan === 'lifetime' ? 'primary-btn' : 'secondary-btn';
+      b.textContent = `${has && plan === 'monthly' ? 'ต่ออายุ 1 เดือน' : PLAN_NAMES[plan]} · ฿${PRICES[plan]}`;
+      b.onclick = () => buyPackage(p, plan);
+      row.appendChild(b);
+    });
+    box.append(h, d, row);
+    card.appendChild(box);
+  });
+  const note = document.createElement('div');
+  note.className = 'plan-note';
+  note.textContent = '1 เดือน = 30 วัน นับวันที่แอดมินเปิดให้เป็นวันแรก แอดมินเป็นคนตรวจสลิปและเปิดใช้งานให้เอง';
+  card.appendChild(note);
+  return card;
+}
+
+async function buyPackage(product, plan) {
+  if (bo.busy) return;
+  const pr = PRODUCTS[product];
+  const open = (bo.purchases || []).find(r => r.product === product);
+  const ok = await confirmDialog('ขอซื้อแพ็กเกจ',
+    `${pr.icon} ${pr.name}\n${PLAN_NAMES[plan]} · ฿${PRICES[plan]}\n\nน้องจะส่งคำขอซื้อให้แอดมิน แล้วแจ้งวิธีโอนเงิน` + (open ? '\n(คุณมีคำขอซื้อแพ็กเกจนี้ค้างอยู่ จะเปลี่ยนเป็นแบบที่เลือกนี้)' : ''), 'ขอซื้อ');
+  if (!ok) return;
+  bo.busy = true;
+  try {
+    const out = await invokeAi({ mode: 'purchase', product, plan });
+    await loadMyPurchase();
+    bo.msgs.push({ role: 'user', text: `ขอซื้อ ${pr.name} ${PLAN_NAMES[plan]} ฿${PRICES[plan]}` });
+    bo.msgs.push({
+      role: 'model', local: true,
+      text: `ส่งคำขอซื้อ ${pr.name} (${PLAN_NAMES[plan]} ฿${out.price}) ให้แอดมินแล้วครับ ✅\n\n` +
+        (out.pay_info ? `วิธีชำระเงิน:\n${out.pay_info}\n\n` : 'แอดมินจะแจ้งวิธีชำระเงินให้ทางข้อความครับ\n\n') +
+        'โอนเสร็จแล้ว กดปุ่ม "🧾 ส่งสลิป" ด้านล่าง แล้วเลือกรูปสลิป น้องจะส่งต่อให้แอดมิน แอดมินตรวจแล้วจะเปิดใช้งานให้และแจ้งทางแชทครับ'
+    });
+    saveBoHistory();
+  } catch (e) {
+    toast(e.message === 'admin_no_need' ? 'คุณเป็นแอดมิน ใช้ได้ทุกอย่างอยู่แล้ว' : (e.message === 'no_admin' ? 'ยังไม่มีบัญชีแอดมินในระบบ' : aiErrorText(e)), 'error');
+  }
+  bo.busy = false;
+  renderBoChat();
+}
+
+function renderSlipBar() {
+  const bar = $('bo-slip-bar');
+  const list = bo.purchases || [];
+  bar.innerHTML = '';
+  bar.classList.toggle('hidden-element', !list.length);
+  list.forEach(r => {
+    const row = document.createElement('div');
+    row.className = 'slip-row';
+    const t = document.createElement('span');
+    t.textContent = `🛒 ${PRODUCTS[r.product].name} · ${PLAN_NAMES[r.plan]} ฿${r.price} · ${r.status === 'slip_sent' ? 'ส่งสลิปแล้ว รอแอดมินเปิดให้' : 'รอโอนเงินและส่งสลิป'}`;
+    const b1 = document.createElement('button');
+    b1.type = 'button';
+    b1.className = 'chip primary';
+    b1.textContent = r.status === 'slip_sent' ? '🧾 ส่งสลิปเพิ่ม' : '🧾 ส่งสลิป';
+    b1.onclick = () => { bo.slipFor = r.id; $('bo-slip-file').click(); };
+    const b2 = document.createElement('button');
+    b2.type = 'button';
+    b2.className = 'chip';
+    b2.textContent = 'ยกเลิกคำขอ';
+    b2.onclick = () => cancelMyPurchase(r.id);
+    row.append(t, b1, b2);
+    bar.appendChild(row);
+  });
+}
+
+async function cancelMyPurchase(id) {
+  const ok = await confirmDialog('ยกเลิกคำขอซื้อ', 'ยกเลิกคำขอซื้อนี้? (ถ้าโอนเงินไปแล้ว โปรดติดต่อแอดมิน)', 'ยกเลิกคำขอ', true);
+  if (!ok) return;
+  const { error } = await sb.rpc('cancel_purchase', { p_request: id });
+  if (error) return handleDbError(error);
+  await loadMyPurchase();
+  renderBoChat();
+}
+
+function b64ToBlob(b64, type) { return new Blob([b64d(b64)], { type }); }
+function dataUrlToBlobSync(u) { const m = /^data:([^;]+);base64,(.*)$/.exec(u); return b64ToBlob(m[2], m[1]); }
+
+// ส่งรูปสลิป: อัปโหลดรูปเข้าที่เก็บไฟล์ของเรา แล้วให้น้องส่งต่อให้แอดมิน (แอดมินเห็นเป็นรูปในแชท)
+async function onSlipPicked(input) {
+  const f = input.files && input.files[0];
+  input.value = '';
+  const id = bo.slipFor;
+  if (!f || !id) return;
+  if (!(f.type || '').startsWith('image/')) return toast('ส่งสลิปได้เฉพาะไฟล์รูปภาพ', 'error');
+  bo.busy = true;
+  const pending = { role: 'model', text: 'กำลังส่งสลิปให้แอดมิน…', streaming: true };
+  bo.msgs.push({ role: 'user', text: '🧾 ส่งสลิปการโอน', files: [] });
+  const me = bo.msgs[bo.msgs.length - 1];
+  bo.msgs.push(pending);
+  renderBoChat();
+  try {
+    const { b64, thumb, w, h } = await aiImageToJpeg(f, 1600, 0.86);
+    me.files = [{ name: 'สลิป.jpg', kind: 'image', thumb }];
+    const main = b64ToBlob(b64, 'image/jpeg');
+    const th = dataUrlToBlobSync(thumb);
+    const path = mediaPath('jpg');
+    const tpath = path.replace(/\.jpg$/, '_t.jpg');
+    await uploadObject(path, main, 'image/jpeg');
+    await uploadObject(tpath, th, 'image/jpeg');
+    await invokeAi({ mode: 'slip', request_id: id, media: { path, thumb: tpath, size: main.size, thumb_size: th.size, w, h } });
+    pending.text = 'ได้รับสลิปแล้ว และส่งต่อให้แอดมินเรียบร้อยครับ ✅ รอแอดมินตรวจและเปิดใช้งานให้ จะมีข้อความแจ้งในแชทกับแอดมิน (app_creator) และที่นี่ครับ';
+    pending.local = true;
+  } catch (e) {
+    pending.text = /no_open_request/.test(e.message) ? 'คำขอซื้อนี้ปิดไปแล้ว (เปิดใช้งานแล้วหรือถูกยกเลิก)' : /too_many_slips/.test(e.message) ? 'ส่งสลิปครบ 5 ใบสำหรับคำขอนี้แล้ว โปรดติดต่อแอดมิน' : 'ส่งสลิปไม่สำเร็จ: ' + (e.message === 'ai_failed' ? 'ลองใหม่อีกครั้ง' : aiErrorText(e).split('\n')[0]);
+    pending.err = true;
+  }
+  pending.streaming = false;
+  bo.busy = false;
+  await loadMyPurchase();
+  saveBoHistory();
+  renderBoChat();
+}
+
+// ---------- การ์ดคำขอซื้อ/สลิปในแชท (แอดมินกดเปิดใช้งานได้จากการ์ด) ----------
+function buildPurchaseCard(msg) {
+  const m = msg.rmeta || {};
+  const card = document.createElement('div');
+  card.className = 'purchase-card st-' + (m.status || 'requested');
+  const head = document.createElement('div');
+  head.className = 'order-head';
+  const title = document.createElement('strong');
+  title.textContent = m.slip ? '🧾 สลิปการโอน' : '🛒 คำขอซื้อแพ็กเกจ';
+  const chip = document.createElement('span');
+  chip.className = 'order-status';
+  chip.textContent = m.status_text || '';
+  head.append(title, chip);
+  card.appendChild(head);
+  const info = document.createElement('div');
+  info.className = 'purchase-info';
+  info.textContent = `${m.buyer || 'ผู้ใช้'} · ${m.product_name || ''} · ${m.plan_text || ''} · ฿${m.price || ''}`;
+  card.appendChild(info);
+  if (msg.media && msg.media.path) card.appendChild(buildMediaEl(msg.media));
+  if (isAdminUser() && m.request_id && !['granted', 'rejected', 'cancelled'].includes(m.status)) {
+    const acts = document.createElement('div');
+    acts.className = 'order-actions purchase-acts';
+    [1, 2, 3, 6, 12].forEach(n => acts.appendChild(chip2(`เปิด ${n} เดือน`, () => confirmGrant(m, n, false))));
+    acts.appendChild(chip2('เปิดตลอดชีพ', () => confirmGrant(m, 0, true)));
+    const rej = chip2('ไม่อนุมัติ', async () => {
+      if (!(await confirmDialog('ไม่อนุมัติคำขอ', `ปฏิเสธคำขอซื้อของ ${m.buyer}?`, 'ไม่อนุมัติ', true))) return;
+      const { error } = await sb.rpc('admin_reject_request', { p_request: m.request_id });
+      if (error) handleDbError(error); else toast('ปฏิเสธคำขอแล้ว', 'info');
+    });
+    rej.classList.add('danger');
+    acts.appendChild(rej);
+    card.appendChild(acts);
+  }
+  return card;
+}
+
+async function confirmGrant(m, months, lifetime) {
+  const what = lifetime ? 'ตลอดชีพ' : `${months} เดือน (${months * 30} วัน นับวันนี้เป็นวันแรก)`;
+  const ok = await confirmDialog('เปิดใช้งานแพ็กเกจ', `เปิด ${m.product_name} ให้ ${m.buyer}\nระยะเวลา: ${what}\n\nตรวจสลิปแล้วใช่ไหม?`, 'เปิดใช้งาน');
+  if (!ok) return;
+  await adminGrant(m.buyer_id, m.product, months, lifetime, m.request_id);
+}
+
+async function adminGrant(userId, product, months, lifetime, requestId) {
+  const { data, error } = await sb.rpc('admin_grant', { p_user: userId, p_product: product, p_months: lifetime ? null : months, p_lifetime: !!lifetime, p_request: requestId || null });
+  if (error) { handleDbError(error); return false; }
+  toast(lifetime ? 'เปิดใช้งานตลอดชีพแล้ว' : `เปิดใช้งานแล้ว ใช้ได้ถึง ${data && data.expires_at ? fmtThaiDate(data.expires_at) : ''}`, 'success');
+  return true;
+}
+
+// ---------- แผงแอดมิน ----------
+async function openAdmin() {
+  if (!isAdminUser()) return;
+  openModal('admin-modal');
+  $('admin-found').innerHTML = '';
+  $('admin-q').value = '';
+  const { data: s } = await sb.from('app_settings').select('value').eq('key', 'pay_info').maybeSingle();
+  $('admin-pay').value = (s && s.value) || '';
+  await loadAdminRequests();
+}
+
+async function adminSavePay() {
+  const { error } = await sb.rpc('admin_set_pay_info', { p_text: $('admin-pay').value });
+  if (error) return handleDbError(error);
+  toast('บันทึกข้อมูลการชำระเงินแล้ว (น้องโบ๊ะบ๊ะจะบอกผู้ซื้อตามนี้)', 'success');
+}
+
+async function loadAdminRequests() {
+  const box = $('admin-reqs');
+  box.innerHTML = '';
+  const { data, error } = await sb.rpc('admin_list_requests');
+  if (error) { box.appendChild(hintNode('โหลดคำขอไม่ได้')); return; }
+  if (!data || !data.length) { box.appendChild(hintNode('ไม่มีคำขอซื้อที่รออยู่')); return; }
+  data.forEach(r => {
+    const card = document.createElement('div');
+    card.className = 'req-card';
+    const t = document.createElement('div');
+    t.innerHTML = '';
+    const nm = document.createElement('strong');
+    nm.textContent = r.nickname || r.username;
+    const sub = document.createElement('div');
+    sub.className = 'hint';
+    sub.style.marginTop = '2px';
+    sub.textContent = `${PRODUCTS[r.product].name} · ${PLAN_NAMES[r.plan]} ฿${r.price} · ${r.status === 'slip_sent' ? `ส่งสลิปแล้ว ${r.slips} ใบ` : 'ยังไม่ส่งสลิป'}`;
+    card.append(nm, sub);
+    const acts = document.createElement('div');
+    acts.className = 'req-actions';
+    acts.appendChild(chip2('คุยกับผู้ซื้อ (ดูสลิป)', () => { closeModal('admin-modal'); closeModal('settings-modal'); openChatById(r.user_id); }));
+    [1, 3, 12].forEach(n => acts.appendChild(chip2(`เปิด ${n} เดือน`, async () => { if (await confirmDialog('เปิดใช้งาน', `เปิด ${PRODUCTS[r.product].name} ให้ ${r.nickname || r.username} ${n} เดือน?`, 'เปิดใช้งาน') && await adminGrant(r.user_id, r.product, n, false, r.id)) loadAdminRequests(); })));
+    acts.appendChild(chip2('ตลอดชีพ', async () => { if (await confirmDialog('เปิดตลอดชีพ', `เปิด ${PRODUCTS[r.product].name} ตลอดชีพให้ ${r.nickname || r.username}?`, 'เปิดใช้งาน') && await adminGrant(r.user_id, r.product, 0, true, r.id)) loadAdminRequests(); }));
+    card.appendChild(acts);
+    box.appendChild(card);
+  });
+}
+
+async function adminSearch() {
+  const q = $('admin-q').value.trim();
+  const box = $('admin-found');
+  box.innerHTML = '';
+  if (q.length < 2) return box.appendChild(hintNode('พิมพ์ชื่อหรือไอดีอย่างน้อย 2 ตัวอักษร'));
+  const { data, error } = await sb.rpc('admin_find_user', { p_q: q });
+  if (error) return box.appendChild(hintNode('ค้นหาไม่ได้'));
+  if (!data || !data.length) return box.appendChild(hintNode('ไม่พบผู้ใช้'));
+  data.forEach(u => {
+    const card = document.createElement('div');
+    card.className = 'req-card';
+    const nm = document.createElement('strong');
+    nm.textContent = `${u.nickname || u.username} (${u.search_id || u.username})`;
+    card.appendChild(nm);
+    ['ai', 'stream'].forEach(p => {
+      const e = u[p] || {};
+      const row = document.createElement('div');
+      row.className = 'admin-prod';
+      const st = document.createElement('span');
+      st.textContent = `${PRODUCTS[p].icon} ${PRODUCTS[p].name}: ` + (e.admin ? 'แอดมิน' : !e.active ? 'ยังไม่เปิด' : e.lifetime ? 'ตลอดชีพ' : `ถึง ${fmtThaiDate(e.expires_at)} (เหลือ ${e.days_left} วัน)`);
+      row.appendChild(st);
+      const acts = document.createElement('div');
+      acts.className = 'req-actions';
+      [1, 3, 12].forEach(n => acts.appendChild(chip2(`+${n} เดือน`, async () => { if (await adminGrant(u.id, p, n, false, null)) adminSearch(); })));
+      acts.appendChild(chip2('ตลอดชีพ', async () => { if (await confirmDialog('เปิดตลอดชีพ', `เปิด ${PRODUCTS[p].name} ตลอดชีพให้ ${u.nickname || u.username}?`, 'เปิดใช้งาน') && await adminGrant(u.id, p, 0, true, null)) adminSearch(); }));
+      if (e.active && !e.admin) {
+        const rv = chip2('ยกเลิกสิทธิ์', async () => { if (!(await confirmDialog('ยกเลิกสิทธิ์', `ยกเลิก ${PRODUCTS[p].name} ของ ${u.nickname || u.username}?`, 'ยกเลิกสิทธิ์', true))) return; const { error: er } = await sb.rpc('admin_revoke', { p_user: u.id, p_product: p }); if (er) handleDbError(er); else { toast('ยกเลิกสิทธิ์แล้ว', 'info'); adminSearch(); } });
+        rv.classList.add('danger');
+        acts.appendChild(rv);
+      }
+      row.appendChild(acts);
+      card.appendChild(row);
+    });
+    box.appendChild(card);
+  });
 }
 
 // ==================== เฟส C: ความเสถียรของแชท ====================
@@ -10033,6 +10904,8 @@ function previewText(chat, last) {
   if (!last) return chat.isGroup ? 'เริ่มต้นการสนทนาของกลุ่ม' : 'เริ่มต้นการสนทนา';
   if (last.kind === 'system') return msgLabel(last);
   if (last.kind === 'ai') return '🤖 น้องโบ๊ะบ๊ะตอบ';
+  if (last.kind === 'purchase') return (last.rmeta && last.rmeta.slip ? '🧾 ' : '🛒 ') + (last.rmeta ? `${last.rmeta.buyer} · ${last.rmeta.product_name}` : 'แพ็กเกจ');
+  if (last.kind === 'order') return '🍽 ' + ((last.rmeta && last.rmeta.label) || 'ออเดอร์อาหาร');
   if (isSecret(chat.id) && !chat.isGroup && last.kind === 'text') return '🔒 ' + (last.isMe ? 'คุณส่งข้อความลับ' : 'ข้อความลับ');
   if (chat.isGroup) return (last.isMe ? 'คุณ' : groupSenderName(chat, last.senderId)) + ': ' + msgLabel(last);
   return (last.isMe ? 'คุณ: ' : '') + msgLabel(last);
