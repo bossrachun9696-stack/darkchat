@@ -1809,3 +1809,20 @@ body[data-mode="glass"] .chat-item-wrap .chat-item[style*="translateX("] {
 .purchase-card .media-wrap img, .purchase-card img { max-width: 100%; border-radius: 12px; }
 .admin-prod { margin-top: 8px; display: flex; flex-direction: column; gap: 4px; font-size: 0.85rem; }
 #admin-pay { width: 100%; padding: 10px 14px; border-radius: 14px; font-family: inherit; background: var(--input-bg); color: var(--text-main); border: 1px solid var(--border-color); outline: none; }
+
+
+/* หัวแชทน้องโบ๊ะบ๊ะ: ชื่อไม่บีบเป็นแนวตั้ง ปุ่มเครื่องมืออยู่แถวถัดไป */
+.bo-title strong { white-space: nowrap; }
+.bo-title span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.bo-tools { display: flex; gap: 8px; flex-wrap: wrap; }
+.bo-tools .chip { padding: 6px 14px; }
+
+/* ป๊อบอัพแพ็กเกจ */
+.plan-panel { width: min(520px, 100%); max-height: min(90vh, 760px); overflow-y: auto; display: flex; flex-direction: column; gap: 10px; }
+.plan-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.plan-reason { padding: 8px 12px; border-radius: 12px; font-size: 0.85rem; font-weight: 700; background: rgba(251, 146, 60, 0.2); border: 1px solid #fb923c; }
+.plan-focus { border-color: #fb923c !important; box-shadow: 0 0 0 2px rgba(251, 146, 60, 0.35); }
+
+/* แจ้งผู้ดูที่ยังไม่มีแพ็กเกจสตรีม */
+.call-locked { position: absolute; z-index: 6; left: 12px; right: 12px; top: calc(70px + env(safe-area-inset-top)); display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; padding: 12px 14px; border-radius: 16px; font-size: 0.88rem; color: #fff; background: rgba(14, 10, 40, 0.82); -webkit-backdrop-filter: blur(12px); backdrop-filter: blur(12px); border: 1px solid #fb923c; }
+.call-locked .primary-btn { padding: 8px 16px; }
