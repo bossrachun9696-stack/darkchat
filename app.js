@@ -1530,9 +1530,9 @@ function loadMessages(keepScroll) {
     }
     prev = msg;
 
-    if (msg.kind === 'purchase') { container.appendChild(buildPurchaseCard(msg)); return; }
-    if (msg.kind === 'order') { container.appendChild(buildOrderCard(msg)); return; }
-    if (msg.kind === 'ai') { container.appendChild(buildAiCard(msg)); return; }
+    if (msg.kind === 'purchase') { container.appendChild(safeCard(buildPurchaseCard, msg)); return; }
+    if (msg.kind === 'order') { container.appendChild(safeCard(buildOrderCard, msg)); return; }
+    if (msg.kind === 'ai') { container.appendChild(safeCard(buildAiCard, msg)); return; }
     if (msg.kind === 'call') {
       const cm = document.createElement('div');
       cm.className = 'call-msg';
@@ -5558,7 +5558,7 @@ function callErrorText(e) {
 function streamErrorText(e) {
   const msg = (e && e.message) || '';
   if (/stream_busy/i.test(msg)) return 'มีคนกำลังสตรีมอยู่ในห้องนี้แล้ว';
-  if (/stream_not_entitled/i.test(msg)) { loadEntitlements(); return 'การสตรีมต้องมีแพ็กเกจสตรีม (ผู้ดูไม่ต้องมี)'; }
+  if (/stream_not_entitled/i.test(msg)) { loadEntitlements(); return 'การสตรีมต้องมีแพ็กเกจสตรีม'; }
   if (/unsupported/i.test(msg)) return 'เบราว์เซอร์นี้แชร์หน้าจอไม่ได้ (ใช้ได้บนคอมพิวเตอร์)';
   if (e && (e.name === 'NotAllowedError' || e.name === 'AbortError')) return 'ยกเลิกการแชร์หน้าจอ';
   return thaiError(e);
@@ -5583,6 +5583,9 @@ class CallSession {
     this.screen = null;
     this.screenTracks = new Set();
     this.remoteScreens = new Map();
+    this.lockedScreens = new Set();   // คนที่สตรีมอยู่แต่ไม่ส่งภาพให้เรา (เรายังไม่มีแพ็กเกจสตรีม)
+    this.allowed = null;              // รหัสคนในสายที่มีแพ็กเกจสตรีม (null = ยังไม่รู้/ไม่ได้ตรวจ ถือว่าได้)
+    this.allowedAt = 0;
     this.beatTimer = null;
   }
 
@@ -5636,8 +5639,11 @@ class CallSession {
     }
     if (p.type === 'share') {                                       // อีกฝั่งเริ่ม/หยุดสตรีมหน้าจอ
       const peer = this.getPeer(p.from);
-      if (p.data && p.data.on) peer.shareId = p.data.id;
-      else { peer.shareId = null; this.removeRemoteScreen(p.from); }
+      if (p.data && p.data.on) {
+        if (p.data.locked) { peer.shareId = null; this.lockedScreens.add(p.from); }   // ผู้สตรีมไม่ส่งภาพให้เรา เพราะเรายังไม่มีแพ็กเกจสตรีม
+        else { peer.shareId = p.data.id; this.lockedScreens.delete(p.from); }
+      } else { peer.shareId = null; this.lockedScreens.delete(p.from); this.removeRemoteScreen(p.from); }
+      renderLock();
       return;
     }
     const peer = this.getPeer(p.from);
@@ -5673,10 +5679,7 @@ class CallSession {
     callTile(uid);
 
     if (this.local) this.local.getTracks().forEach(t => pc.addTrack(t, this.local));
-    if (this.screen) {                                              // เรากำลังสตรีมอยู่: ส่งหน้าจอให้คนที่เพิ่งเข้ามาด้วย
-      this.send(uid, 'share', { on: true, id: this.screen.id });
-      this.screen.getTracks().forEach(t => pc.addTrack(t, this.screen));
-    }
+    if (this.screen) attachScreenTo(this, uid);   // กำลังสตรีมอยู่แล้วมีคนใหม่เข้ามา: ส่งภาพให้เฉพาะคนที่มีแพ็กเกจสตรีม
 
     // ทำงานต่อคิวเดียวกับการรับสัญญาณ (peer.chain) เพื่อไม่ให้ชนกับการตอบรับข้อเสนอจากอีกฝั่ง
     pc.onnegotiationneeded = () => {
@@ -5863,9 +5866,10 @@ class CallSession {
       if (t.kind === 'video') { try { t.contentHint = 'motion'; } catch (e) { /* ไม่เป็นไร */ } }
       t.onended = () => { if (this.screen === scr) this.stopScreenShare(); };   // กด "หยุดแชร์" ของเบราว์เซอร์
     });
-    this.send('*', 'share', { on: true, id: scr.id });             // บอกก่อนส่งภาพ ผู้รับจะได้รู้ว่าสตรีมนี้คือหน้าจอ
-    this.peers.forEach(({ pc }) => scr.getTracks().forEach(t => pc.addTrack(t, scr)));
-    this.beatTimer = setInterval(() => { sb.rpc('beat_stream', { p_call: this.callId }); }, 25000);
+    this.peers.forEach(p => { p.screenSent = false; p.screenLocked = false; });
+    await refreshStreamAllowed(this, true);
+    this.peers.forEach((_, uid) => attachScreenTo(this, uid));    // ส่งภาพให้เฉพาะคนที่มีแพ็กเกจสตรีม คนอื่นจะเห็นข้อความให้ซื้อแพ็กเกจ
+    this.beatTimer = setInterval(() => { sb.rpc('beat_stream', { p_call: this.callId }); recheckStreamViewers(this); }, 25000);
     this.tune();
   }
 
@@ -5875,6 +5879,7 @@ class CallSession {
     this.screen = null;
     clearInterval(this.beatTimer);
     this.send('*', 'share', { on: false });
+    this.peers.forEach(p => { p.screenSent = false; p.screenLocked = false; });
     this.peers.forEach(({ pc }) => pc.getSenders().forEach(s => {
       if (s.track && this.screenTracks.has(s.track)) { try { pc.removeTrack(s); } catch (e) { /* ไม่เป็นไร */ } }
     }));
@@ -6003,7 +6008,8 @@ function renderScreen() {
   const box = $('call-screen');
   const v = $('call-screen-video');
   const chips = $('call-screen-chips');
-  const st = s && CALL.screenView && s.remoteScreens.get(CALL.screenView);
+  const blockedView = !!(state.ent && !entActive('stream'));   // ยังไม่มีแพ็กเกจสตรีม: ไม่แสดงภาพสตรีมของคนอื่น
+  const st = !blockedView && s && CALL.screenView && s.remoteScreens.get(CALL.screenView);
   if (!st) {
     zoomReset();
     box.classList.add('hidden-element');
@@ -6026,7 +6032,15 @@ function renderScreen() {
       });
     }
   }
+  renderLock();
   updateCallLayout();
+}
+
+function renderLock() {
+  const s = CALL.session;
+  const blocked = !!(state.ent && !entActive('stream'));
+  const show = !!s && (s.lockedScreens.size > 0 || (blocked && s.remoteScreens.size > 0));
+  $('call-locked').classList.toggle('hidden-element', !show);
 }
 
 function callStatusText() {
@@ -7400,7 +7414,7 @@ function saveBoHistory() {
 async function openBoChat(mode) {
   if (!currentUser) return;
   loadBoHistory();
-  bo.showPlans = mode === 'packages' || !entActive('ai');
+  if (mode === 'packages') openPlans();
   renderBoChat();
   openModal('bo-modal');
   hideBoBubble(false);
@@ -7410,7 +7424,7 @@ async function openBoChat(mode) {
   renderBoChat();
 }
 
-function toggleBoPlans() { bo.showPlans = !bo.showPlans; renderBoChat(); }
+function toggleBoPlans() { openPlans(); }
 
 function closeBoChat() { closeModal('bo-modal'); }
 
@@ -7466,7 +7480,7 @@ function boRow(m) {
   return row;
 }
 
-const BO_SALES_SUGGEST = ['แพ็กเกจแต่ละอันต่างกันยังไง', 'ซื้อแล้วโอนยังไง', 'ใช้ได้กี่วัน นับยังไง'];
+const BO_SALES_SUGGEST = ['ตั้ง PIN ล็อกแอปยังไง', 'สตรีมหน้าจอยังไง', 'แพ็กเกจต่างกันยังไง'];
 
 function renderBoChat() {
   const box = $('bo-msgs');
@@ -7474,11 +7488,11 @@ function renderBoChat() {
   const hasAi = entActive('ai');
   $('bo-attach-btn').classList.toggle('hidden-element', !hasAi);
   $('bo-quality').classList.toggle('hidden-element', !hasAi);
-  if (bo.showPlans) box.appendChild(buildPlanCard());
+  $('bo-plans-btn').classList.toggle('hidden-element', isAdminUser());
   if (!bo.msgs.length) {
     box.appendChild(boRow({ role: 'model', text: hasAi
       ? 'สวัสดีครับ น้องโบ๊ะบ๊ะเองครับ ผู้ช่วย AI ของ DarkChat\nสอนใช้งานหรือตั้งค่าแอป หรือจะคุยเรื่องอื่นๆ ก็ถามได้เลยครับ แนบรูปให้น้องดูก็ได้นะ'
-      : 'สวัสดีครับ น้องโบ๊ะบ๊ะเองครับ\nตอนนี้ยังไม่ได้เปิดแพ็กเกจ AI น้องจึงช่วยเรื่องแพ็กเกจและวิธีซื้อได้เท่านั้นครับ เลือกแพ็กเกจด้านบนได้เลย หรือพิมพ์ถามรายละเอียดก่อนก็ได้ครับ' }));
+      : 'สวัสดีครับ น้องโบ๊ะบ๊ะเองครับ\nน้องตอบเรื่องการใช้งานและการตั้งค่าทุกอย่างในแอปให้ฟรีครับ ส่วนเรื่องนอกแอป (ความรู้ทั่วไป ค้นข้อมูล แนบรูป ฯลฯ) ต้องมีแพ็กเกจ AI กดปุ่ม 🛒 แพ็กเกจ ด้านบนได้เลยครับ' }));
   }
   bo.msgs.forEach(m => box.appendChild(boRow(m)));
   const chips = $('bo-chips');
@@ -7495,7 +7509,7 @@ function renderBoChat() {
   }
   renderSlipBar();
   refreshBoImages();
-  box.scrollTop = bo.showPlans && !bo.msgs.length ? 0 : box.scrollHeight;
+  box.scrollTop = box.scrollHeight;   // ข้อความล่าสุดอยู่ล่างสุดเสมอ ไม่ต้องเลื่อนหาเอง
 }
 
 async function sendBoMessage(e, preset) {
@@ -8843,7 +8857,7 @@ function startShopPolling() {
 // ==================== เฟส J: แพ็กเกจ (AI + แปลภาษา / สตรีม) ====================
 const PRODUCTS = {
   ai: { icon: '🤖', name: 'AI และแปลภาษา', desc: 'ถามน้องโบ๊ะบ๊ะ แนบรูป/ไฟล์ให้ AI ดู เรียกน้องในห้องแชท และแปลภาษาอัตโนมัติ' },
-  stream: { icon: '📺', name: 'สตรีม', desc: 'แชร์หน้าจอจากคอมพิวเตอร์ให้เพื่อนดู (ผู้ดูไม่ต้องซื้อ ซื้อเฉพาะคนสตรีม)' }
+  stream: { icon: '📺', name: 'สตรีม', desc: 'แชร์หน้าจอจากคอมพิวเตอร์ และดูการแชร์หน้าจอของคนอื่น (ซื้อครั้งเดียวได้ทั้งสตรีมและดู)' }
 };
 const PRICES = { monthly: 29, lifetime: 99 };
 const PLAN_NAMES = { monthly: 'รายเดือน (30 วัน)', lifetime: 'ตลอดชีพ' };
@@ -8890,13 +8904,54 @@ function renderEntitlementUI() {
   const ag = document.getElementById('set-admin-group');
   if (ag) ag.classList.toggle('hidden-element', !isAdminUser());
   if (!$('bo-modal').classList.contains('hidden-element')) renderBoChat();
+  if (!$('plan-modal').classList.contains('hidden-element')) renderPlans();
 }
 
-async function needPlan(p) {
-  const pr = PRODUCTS[p];
-  const ok = await confirmDialog(`ต้องมีแพ็กเกจ ${pr.name}`,
-    `${pr.desc}\n\nราคา ${PRICES.monthly} บาทต่อเดือน หรือ ${PRICES.lifetime} บาทตลอดชีพ\nให้น้องโบ๊ะบ๊ะอธิบายและช่วยสั่งซื้อไหม?`, 'ดูแพ็กเกจ');
-  if (ok) openBoChat('packages');
+// ฟีเจอร์ที่ต้องซื้อ: เด้งป๊อบอัพแพ็กเกจทันที (เน้นแพ็กเกจที่ต้องใช้)
+function needPlan(p) { return openPlans(p); }
+
+let planFocus = null;
+
+async function openPlans(product) {
+  planFocus = product || null;
+  openModal('plan-modal');
+  renderPlans();
+  await Promise.all([loadEntitlements(), loadMyPurchase()]);
+  renderPlans();
+}
+
+function closePlans() { closeModal('plan-modal'); }
+
+function renderPlans() {
+  const reason = $('plan-reason');
+  const body = $('plan-body');
+  const open = $('plan-open');
+  body.innerHTML = '';
+  open.innerHTML = '';
+  const need = planFocus && !entActive(planFocus);
+  reason.textContent = need ? `ฟีเจอร์นี้ต้องมีแพ็กเกจ ${PRODUCTS[planFocus].name}` : '';
+  reason.classList.toggle('hidden-element', !need);
+  if (isAdminUser()) { body.appendChild(hintNode('คุณเป็นแอดมิน ใช้ได้ทุกอย่างอยู่แล้ว ไม่ต้องซื้อแพ็กเกจ')); return; }
+  body.appendChild(buildPlanCard(planFocus));
+  (bo.purchases || []).forEach(r => {   // คำขอซื้อที่ค้างอยู่: ส่งสลิป/ยกเลิกได้จากตรงนี้เลย
+    const row = document.createElement('div');
+    row.className = 'slip-row';
+    const t = document.createElement('span');
+    t.textContent = `🛒 ${PRODUCTS[r.product].name} · ${PLAN_NAMES[r.plan]} ฿${r.price} · ${r.status === 'slip_sent' ? 'ส่งสลิปแล้ว รอแอดมินเปิดให้' : 'รอโอนเงินและส่งสลิป'}`;
+    const b1 = chip2(r.status === 'slip_sent' ? '🧾 ส่งสลิปเพิ่ม' : '🧾 ส่งสลิป', () => startSlip(r.id));
+    b1.className = 'chip primary';
+    const b2 = chip2('ยกเลิกคำขอ', async () => { await cancelMyPurchase(r.id); renderPlans(); });
+    row.append(t, b1, b2);
+    open.appendChild(row);
+  });
+}
+
+// เลือกรูปสลิปจากป๊อบอัพ: ต้องเปิดตัวเลือกไฟล์ทันที (ภายในการกดครั้งเดียว มือถือถึงจะยอม) แล้วค่อยปิดป๊อบอัพและเปิดแชทน้องให้เห็นความคืบหน้า
+function startSlip(id) {
+  bo.slipFor = id;
+  $('bo-slip-file').click();
+  closePlans();
+  openBoChat();
 }
 
 // ---------- แพ็กเกจ/คำขอซื้อในแชทกับน้องโบ๊ะบ๊ะ ----------
@@ -8904,19 +8959,21 @@ async function loadMyPurchase() {
   const { data, error } = await sb.from('purchase_requests').select('id, product, plan, price, status, slips')
     .in('status', ['requested', 'slip_sent']).order('created_at', { ascending: false });
   if (error) { bo.purchases = []; return; }
+  if (isAdminUser() && data && data.length) {   // แอดมินไม่ต้องซื้อ: ยกเลิกคำขอทดสอบที่ค้างอยู่ของตัวเองเงียบๆ
+    for (const r of data) await sb.rpc('cancel_purchase', { p_request: r.id });
+    bo.purchases = [];
+    return;
+  }
   bo.purchases = data || [];
 }
 
-function buildPlanCard() {
+function buildPlanCard(focus) {
   const card = document.createElement('div');
   card.className = 'plan-card';
-  const title = document.createElement('strong');
-  title.textContent = '🛒 แพ็กเกจของ DarkChat';
-  card.appendChild(title);
-  Object.keys(PRODUCTS).forEach(p => {
+  Object.keys(PRODUCTS).sort((a, b) => (b === focus) - (a === focus)).forEach(p => {
     const pr = PRODUCTS[p];
     const box = document.createElement('div');
-    box.className = 'plan-prod';
+    box.className = 'plan-prod' + (p === focus ? ' plan-focus' : '');
     const h = document.createElement('div');
     h.className = 'plan-head';
     const nm = document.createElement('span');
@@ -8963,6 +9020,8 @@ async function buyPackage(product, plan) {
   try {
     const out = await invokeAi({ mode: 'purchase', product, plan });
     await loadMyPurchase();
+    closePlans();
+    loadBoHistory();
     bo.msgs.push({ role: 'user', text: `ขอซื้อ ${pr.name} ${PLAN_NAMES[plan]} ฿${PRICES[plan]}` });
     bo.msgs.push({
       role: 'model', local: true,
@@ -8971,6 +9030,8 @@ async function buyPackage(product, plan) {
         'โอนเสร็จแล้ว กดปุ่ม "🧾 ส่งสลิป" ด้านล่าง แล้วเลือกรูปสลิป น้องจะส่งต่อให้แอดมิน แอดมินตรวจแล้วจะเปิดใช้งานให้และแจ้งทางแชทครับ'
     });
     saveBoHistory();
+    openModal('bo-modal');   // พาไปที่แชทน้องทันที เห็นวิธีโอนและปุ่มส่งสลิปโดยไม่ต้องเลื่อนหา
+    hideBoBubble(false);
   } catch (e) {
     toast(e.message === 'admin_no_need' ? 'คุณเป็นแอดมิน ใช้ได้ทุกอย่างอยู่แล้ว' : (e.message === 'no_admin' ? 'ยังไม่มีบัญชีแอดมินในระบบ' : aiErrorText(e)), 'error');
   }
@@ -8980,7 +9041,7 @@ async function buyPackage(product, plan) {
 
 function renderSlipBar() {
   const bar = $('bo-slip-bar');
-  const list = bo.purchases || [];
+  const list = isAdminUser() ? [] : (bo.purchases || []);
   bar.innerHTML = '';
   bar.classList.toggle('hidden-element', !list.length);
   list.forEach(r => {
@@ -9069,7 +9130,7 @@ function buildPurchaseCard(msg) {
   info.className = 'purchase-info';
   info.textContent = `${m.buyer || 'ผู้ใช้'} · ${m.product_name || ''} · ${m.plan_text || ''} · ฿${m.price || ''}`;
   card.appendChild(info);
-  if (msg.media && msg.media.path) card.appendChild(buildMediaEl(msg.media));
+  if (msg.media && msg.media.path) card.appendChild(buildMediaEl(msg));   // buildMediaEl รับตัวข้อความ (ใช้ msg.media ข้างใน)
   if (isAdminUser() && m.request_id && !['granted', 'rejected', 'cancelled'].includes(m.status)) {
     const acts = document.createElement('div');
     acts.className = 'order-actions purchase-acts';
@@ -9181,6 +9242,54 @@ async function adminSearch() {
     });
     box.appendChild(card);
   });
+}
+
+// การ์ดชนิดพิเศษวาดพลาดใบเดียว ต้องไม่ทำให้ทั้งแชทพัง (แชทจะได้ยังเลื่อนลงล่างสุดและวาดข้อความที่เหลือครบ)
+function safeCard(builder, msg) {
+  try { return builder(msg); }
+  catch (e) {
+    console.error('card render', e);
+    const d = document.createElement('div');
+    d.className = 'order-note';
+    d.style.textAlign = 'center';
+    d.textContent = msg.text || 'ข้อความ';
+    return d;
+  }
+}
+
+// ---------- สตรีมต้องมีแพ็กเกจ: ผู้สตรีมส่งภาพให้เฉพาะคนที่มีแพ็กเกจสตรีม (ถามจากเซิร์ฟเวอร์ ไม่เชื่อฝั่งผู้ดู) ----------
+async function refreshStreamAllowed(s, force) {
+  if (!force && Date.now() - s.allowedAt < 4000) return;
+  try {
+    const { data, error } = await sb.rpc('call_stream_viewers', { p_call: s.callId });
+    s.allowed = error || !Array.isArray(data) ? null : new Set(data);   // ตรวจไม่ได้ (ยังไม่ได้รัน SQL): ไม่ล็อก
+  } catch (e) { s.allowed = null; }
+  s.allowedAt = Date.now();
+}
+
+function streamPeerAllowed(s, uid) { return !s.allowed || s.allowed.has(uid); }
+
+async function attachScreenTo(s, uid) {
+  if (!s.screen || s.closed) return;
+  await refreshStreamAllowed(s, false);
+  const peer = s.peers.get(uid);
+  if (!peer || !s.screen || peer.screenSent) return;
+  if (streamPeerAllowed(s, uid)) {
+    peer.screenSent = true;
+    peer.screenLocked = false;
+    s.send(uid, 'share', { on: true, id: s.screen.id });
+    s.screen.getTracks().forEach(t => peer.pc.addTrack(t, s.screen));
+  } else if (!peer.screenLocked) {
+    peer.screenLocked = true;
+    s.send(uid, 'share', { on: true, id: s.screen.id, locked: true });   // บอกฝั่งนั้นว่ามีสตรีม แต่ต้องมีแพ็กเกจถึงจะดูได้
+  }
+}
+
+// ระหว่างสตรีม: คนที่เพิ่งซื้อแพ็กเกจจะได้ภาพภายใน 25 วินาที
+async function recheckStreamViewers(s) {
+  if (!s.screen || s.closed) return;
+  await refreshStreamAllowed(s, true);
+  s.peers.forEach((p, uid) => { if (p.screenLocked && streamPeerAllowed(s, uid)) { p.screenLocked = false; attachScreenTo(s, uid); } });
 }
 
 // ==================== เฟส C: ความเสถียรของแชท ====================
