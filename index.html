@@ -548,7 +548,7 @@
           <div><strong>📺 สตรีม</strong><span class="hint ent-status" id="ent-stream-status">กำลังตรวจสอบ…</span></div>
         </div>
         <div class="stack">
-          <button type="button" class="secondary-btn" onclick="closeModal('settings-modal');openBoChat('packages')">🛒 ซื้อ / ต่ออายุ แพ็กเกจ</button>
+          <button type="button" class="secondary-btn" onclick="closeModal('settings-modal');openPlans()">🛒 ซื้อ / ต่ออายุ แพ็กเกจ</button>
         </div>
         <span class="hint">แพ็กเกจละ 29 บาทต่อเดือน หรือ 99 บาทตลอดชีพ ทักน้องโบ๊ะบ๊ะเพื่อซื้อ</span>
       </details>
@@ -1122,6 +1122,10 @@
   <!-- หน้าจอสาย (โทรเสียง/วิดีโอ/สตรีมหน้าจอ) -->
   <div id="call-overlay" class="call-overlay hidden-element" data-layout="voice">
     <div class="call-bg"></div>
+    <div id="call-locked" class="call-locked hidden-element">
+      <span>📺 มีคนกำลังแชร์หน้าจอ แต่การดูต้องมีแพ็กเกจสตรีม</span>
+      <button type="button" class="primary-btn" onclick="openPlans('stream')">ดูแพ็กเกจ</button>
+    </div>
     <div id="call-screen" class="call-screen hidden-element">
       <video id="call-screen-video" autoplay playsinline></video>
       <div id="zoom-badge" class="zoom-badge hidden-element"></div>
@@ -1209,10 +1213,12 @@
       <div class="bo-head">
         <div class="bo-avatar"><img class="bo-img" alt=""><span class="bo-fallback">🤖</span></div>
         <div class="bo-title"><strong>น้องโบ๊ะบ๊ะ</strong><span>ผู้ช่วย AI ของ DarkChat</span></div>
-        <button type="button" id="bo-plans-btn" class="chip" onclick="toggleBoPlans()">🛒 แพ็กเกจ</button>
-        <button type="button" id="bo-quality" class="chip" onclick="toggleBoQuality()">⚡ เร็ว</button>
         <button type="button" class="icon-btn" aria-label="ล้างการสนทนา" title="ล้างการสนทนา" onclick="clearBoChat()">🗑</button>
         <button type="button" class="icon-btn" aria-label="ปิด" onclick="closeBoChat()">✕</button>
+      </div>
+      <div class="bo-tools">
+        <button type="button" id="bo-plans-btn" class="chip" onclick="toggleBoPlans()">🛒 แพ็กเกจ</button>
+        <button type="button" id="bo-quality" class="chip" onclick="toggleBoQuality()">⚡ เร็ว</button>
       </div>
       <div id="bo-msgs" class="bo-msgs"></div>
       <div id="bo-chips" class="bo-chips"></div>
@@ -1357,6 +1363,19 @@
         </div>
         <button type="button" id="shop-chat-only" class="shop-link" onclick="shopSend(true)">ส่งเข้าแชทอย่างเดียว (ยังไม่เข้าระบบร้าน)</button>
       </div>
+    </div>
+  </div>
+
+  <!-- ป๊อบอัพแพ็กเกจ -->
+  <div id="plan-modal" class="modal hidden-element" onclick="if(event.target===this)closePlans()">
+    <div class="modal-content plan-panel">
+      <div class="plan-top">
+        <strong>🛒 แพ็กเกจ DarkChat</strong>
+        <button type="button" class="icon-btn" aria-label="ปิด" onclick="closePlans()">✕</button>
+      </div>
+      <div id="plan-reason" class="plan-reason hidden-element"></div>
+      <div id="plan-body"></div>
+      <div id="plan-open" class="slip-bar"></div>
     </div>
   </div>
 
