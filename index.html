@@ -228,6 +228,8 @@
             <svg viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="16" rx="2"/><path d="M3 10h18M8 3v4M16 3v4"/></svg></button>
           <button type="button" onclick="openLocationSheet()">ตำแหน่งที่ตั้ง
             <svg viewBox="0 0 24 24"><path d="M12 21s7-6.2 7-12a7 7 0 0 0-14 0c0 5.8 7 12 7 12z"/><circle cx="12" cy="9" r="2.5"/></svg></button>
+          <button type="button" onclick="openShop()">สั่งอาหาร
+            <svg viewBox="0 0 24 24"><path d="M6 3v7a2 2 0 0 0 4 0V3M8 10v11M17 3c-2.5 2-2.5 7 0 9v9"/></svg></button>
         </div>
 
         <div id="sticker-panel" class="sticker-panel hidden-element">
@@ -398,9 +400,11 @@
 
   <!-- การตั้งค่า -->
   <div id="settings-modal" class="modal hidden-element" onclick="if(event.target===this)closeModal('settings-modal')">
-    <div class="modal-content">
+    <div class="modal-content settings-panel">
       <h3>การตั้งค่า</h3>
 
+      <details class="set-group" open>
+        <summary>🔒 ความปลอดภัยและการล็อก</summary>
       <div class="set-row">
         <div>
           <strong>ล็อกแอปด้วย PIN</strong>
@@ -441,16 +445,14 @@
         <button type="button" class="mini-btn ghost" onclick="openBackup()">จัดการ</button>
       </div>
 
-      <div class="set-row">
-        <div>
-          <strong>สถานะออนไลน์</strong>
-          <span class="hint">ปิดแล้วเพื่อนจะไม่เห็นว่าคุณออนไลน์</span>
-        </div>
-        <label class="switch">
-          <input type="checkbox" id="st-show-online" onchange="updatePrivacy('show_online', this.checked)"><span class="slider"></span>
-        </label>
+      <div class="stack">
+        <button type="button" class="secondary-btn" onclick="startChangePin()">เปลี่ยน PIN</button>
+        <button type="button" class="secondary-btn" onclick="openPasswordModal()">เปลี่ยนรหัสผ่าน</button>
       </div>
+      </details>
 
+      <details class="set-group">
+        <summary>🔔 การแจ้งเตือน</summary>
       <div class="set-row">
         <div>
           <strong>การแจ้งเตือน</strong>
@@ -487,7 +489,27 @@
           <input type="checkbox" id="hide-push" onchange="saveNotifyPrefs()"><span class="slider"></span>
         </label>
       </div>
+      </details>
 
+      <details class="set-group">
+        <summary>🙈 ความเป็นส่วนตัว</summary>
+      <div class="set-row">
+        <div>
+          <strong>สถานะออนไลน์</strong>
+          <span class="hint">ปิดแล้วเพื่อนจะไม่เห็นว่าคุณออนไลน์</span>
+        </div>
+        <label class="switch">
+          <input type="checkbox" id="st-show-online" onchange="updatePrivacy('show_online', this.checked)"><span class="slider"></span>
+        </label>
+      </div>
+
+      <div class="stack">
+        <button type="button" class="secondary-btn" onclick="openBlockedModal()">รายชื่อที่ถูกบล็อก</button>
+      </div>
+      </details>
+
+      <details class="set-group">
+        <summary>🎨 หน้าตาและธีม</summary>
       <div class="set-block">
         <strong>ธีม</strong>
         <div class="segmented">
@@ -515,12 +537,28 @@
         </div>
         <div id="glass-presets" class="theme-grid"></div>
       </div>
+      </details>
 
-      <div class="stack">
-        <button type="button" class="secondary-btn" onclick="openPasswordModal()">เปลี่ยนรหัสผ่าน</button>
-        <button type="button" class="secondary-btn" onclick="startChangePin()">เปลี่ยน PIN</button>
-        <button type="button" class="secondary-btn" onclick="openBlockedModal()">รายชื่อที่ถูกบล็อก</button>
-      </div>
+      <details class="set-group">
+        <summary>⭐ แพ็กเกจและ AI</summary>
+        <div class="set-row">
+          <div><strong>🤖 AI และแปลภาษา</strong><span class="hint ent-status" id="ent-ai-status">กำลังตรวจสอบ…</span></div>
+        </div>
+        <div class="set-row">
+          <div><strong>📺 สตรีม</strong><span class="hint ent-status" id="ent-stream-status">กำลังตรวจสอบ…</span></div>
+        </div>
+        <div class="stack">
+          <button type="button" class="secondary-btn" onclick="closeModal('settings-modal');openBoChat('packages')">🛒 ซื้อ / ต่ออายุ แพ็กเกจ</button>
+        </div>
+        <span class="hint">แพ็กเกจละ 29 บาทต่อเดือน หรือ 99 บาทตลอดชีพ ทักน้องโบ๊ะบ๊ะเพื่อซื้อ</span>
+      </details>
+
+      <details class="set-group hidden-element" id="set-admin-group">
+        <summary>🛠 แอดมิน</summary>
+        <div class="stack">
+          <button type="button" class="secondary-btn" onclick="openAdmin()">แผงแอดมิน: คำขอซื้อ · เปิดแพ็กเกจ · ข้อมูลชำระเงิน</button>
+        </div>
+      </details>
 
       <div class="modal-actions">
         <button class="secondary-btn" onclick="closeModal('settings-modal')">ปิด</button>
@@ -1171,15 +1209,18 @@
       <div class="bo-head">
         <div class="bo-avatar"><img class="bo-img" alt=""><span class="bo-fallback">🤖</span></div>
         <div class="bo-title"><strong>น้องโบ๊ะบ๊ะ</strong><span>ผู้ช่วย AI ของ DarkChat</span></div>
+        <button type="button" id="bo-plans-btn" class="chip" onclick="toggleBoPlans()">🛒 แพ็กเกจ</button>
         <button type="button" id="bo-quality" class="chip" onclick="toggleBoQuality()">⚡ เร็ว</button>
         <button type="button" class="icon-btn" aria-label="ล้างการสนทนา" title="ล้างการสนทนา" onclick="clearBoChat()">🗑</button>
         <button type="button" class="icon-btn" aria-label="ปิด" onclick="closeBoChat()">✕</button>
       </div>
       <div id="bo-msgs" class="bo-msgs"></div>
       <div id="bo-chips" class="bo-chips"></div>
+      <div id="bo-slip-bar" class="slip-bar hidden-element"></div>
+      <input type="file" id="bo-slip-file" hidden accept="image/*" onchange="onSlipPicked(this)">
       <div id="bo-files" class="ai-files"></div>
       <form class="bo-form" onsubmit="sendBoMessage(event)">
-        <button type="button" class="icon-btn bo-attach" aria-label="แนบไฟล์" title="แนบรูป / PDF / ไฟล์ข้อความ" onclick="pickAiFiles('bo')">📎</button>
+        <button type="button" id="bo-attach-btn" class="icon-btn bo-attach" aria-label="แนบไฟล์" title="แนบรูป / PDF / ไฟล์ข้อความ" onclick="pickAiFiles('bo')">📎</button>
         <input type="file" id="bo-file" hidden multiple accept="image/*,application/pdf,text/*,.md,.csv,.json,.log,.js,.ts,.py,.html,.css,.xml,.yml,.yaml,.sql" onchange="onAiFilePicked('bo', this)">
         <textarea id="bo-input" rows="1" maxlength="1500" placeholder="พิมพ์ถามน้องโบ๊ะบ๊ะ… (แนบรูปหรือไฟล์ได้)"></textarea>
         <button type="submit" class="primary-btn">ส่ง</button>
@@ -1272,6 +1313,75 @@
           <button type="button" id="bk-remove" class="secondary-btn danger" onclick="bkRemove()">ปิดการสำรอง</button>
           <button type="button" class="primary-btn" onclick="closeModal('backup-modal')">ปิด</button>
         </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- สั่งอาหาร (เชื่อมเว็บร้าน) -->
+  <div id="shop-modal" class="modal hidden-element" onclick="if(event.target===this)closeShop()">
+    <div class="modal-content shop-panel">
+      <div class="shop-head">
+        <div class="shop-title"><strong>🍽 สั่งอาหาร</strong><span id="shop-sub" class="hint"></span></div>
+        <button type="button" class="icon-btn" aria-label="รีเฟรชเมนู" title="รีเฟรชเมนู" onclick="shopRefresh()">⟳</button>
+        <button type="button" class="icon-btn" aria-label="ปิด" onclick="closeShop()">✕</button>
+      </div>
+
+      <div id="shop-step-menu" class="shop-step-box">
+        <input type="search" id="shop-search" placeholder="ค้นหาเมนู…" oninput="renderShopMenu()">
+        <div id="shop-cats" class="shop-cats"></div>
+        <div id="shop-list" class="shop-list"></div>
+        <div class="shop-bar">
+          <span id="shop-bar-text"></span>
+          <button type="button" id="shop-bar-btn" class="primary-btn" onclick="shopReview()" disabled>ตรวจและส่ง</button>
+        </div>
+      </div>
+
+      <div id="shop-step-review" class="shop-step-box hidden-element">
+        <div id="shop-review-list" class="shop-list"></div>
+        <div class="shop-seg">
+          <button type="button" id="shop-ch-table" class="chip" onclick="shopSetChannel('table')">🪑 สั่งที่โต๊ะ</button>
+          <button type="button" id="shop-ch-online" class="chip" onclick="shopSetChannel('online')">📱 สั่งออนไลน์</button>
+        </div>
+        <div id="shop-table-box" class="hidden-element">
+          <select id="shop-table-sel"></select>
+          <input type="text" id="shop-table-txt" maxlength="40" placeholder="เลขโต๊ะ เช่น 5">
+        </div>
+        <input type="text" id="shop-name" maxlength="40" placeholder="ชื่อผู้สั่ง">
+        <textarea id="shop-note" rows="2" maxlength="200" placeholder="หมายเหตุทั้งออเดอร์ (ไม่บังคับ)"></textarea>
+        <div id="shop-total" class="hint"></div>
+        <div id="shop-offline-hint" class="shop-warn hidden-element">ติดต่อร้านไม่ได้ ถ้ารีบ กด "ส่งเข้าแชทอย่างเดียว" ได้ (ร้านจะยังไม่ได้รับออเดอร์ในระบบ)</div>
+        <div class="modal-actions">
+          <button type="button" class="secondary-btn" onclick="shopBack()">← เลือกเมนู</button>
+          <button type="button" id="shop-copy" class="secondary-btn" onclick="shopCopyText()">คัดลอกข้อความ</button>
+          <button type="button" id="shop-send" class="primary-btn" onclick="shopSend(false)">ส่งเข้าร้านและแชท</button>
+        </div>
+        <button type="button" id="shop-chat-only" class="shop-link" onclick="shopSend(true)">ส่งเข้าแชทอย่างเดียว (ยังไม่เข้าระบบร้าน)</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ดูรูปที่แนบในแชทกับน้องโบ๊ะบ๊ะ -->
+  <div id="bo-lightbox" class="bo-lightbox hidden-element" onclick="this.classList.add('hidden-element')">
+    <img id="bo-lightbox-img" alt="">
+  </div>
+
+  <!-- แผงแอดมิน -->
+  <div id="admin-modal" class="modal hidden-element" onclick="if(event.target===this)closeModal('admin-modal')">
+    <div class="modal-content">
+      <h3>🛠 แผงแอดมิน</h3>
+      <strong>คำขอซื้อที่รออยู่</strong>
+      <div id="admin-reqs" class="user-results"></div>
+      <strong>ค้นหาผู้ใช้เพื่อเปิด/ยกเลิกแพ็กเกจ</strong>
+      <div class="inline-form">
+        <input type="text" id="admin-q" class="plain-input" placeholder="ชื่อหรือไอดีผู้ใช้" onkeydown="if(event.key==='Enter')adminSearch()">
+        <button type="button" class="mini-btn" onclick="adminSearch()">ค้นหา</button>
+      </div>
+      <div id="admin-found" class="user-results"></div>
+      <strong>ข้อมูลการชำระเงิน (น้องโบ๊ะบ๊ะบอกผู้ซื้อ)</strong>
+      <textarea id="admin-pay" rows="3" maxlength="1000" placeholder="เช่น พร้อมเพย์ 08x-xxx-xxxx ชื่อบัญชี ..."></textarea>
+      <div class="modal-actions">
+        <button type="button" class="secondary-btn" onclick="closeModal('admin-modal')">ปิด</button>
+        <button type="button" class="primary-btn" onclick="adminSavePay()">บันทึกข้อมูลชำระเงิน</button>
       </div>
     </div>
   </div>
