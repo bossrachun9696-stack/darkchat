@@ -17,6 +17,7 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Prompt:wght@400;500;600;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="style.css">
+  <link rel="stylesheet" href="extensions.css">
 
   <!-- Supabase JS SDK -->
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
@@ -126,6 +127,7 @@
           <button type="button" class="quick-btn group-btn" onclick="openCreateGroup()">+ สร้างกลุ่ม</button>
           <button type="button" class="quick-btn" onclick="openFriendsModal()">เพื่อนทั้งหมด</button>
           <button type="button" class="quick-btn" onclick="openRequestsModal()">คำขอ<span id="req-badge" class="req-badge hidden-element">0</span></button>
+          <button type="button" class="quick-btn ext-btn" onclick="openExtStore()">🧩 ส่วนขยาย</button>
         </div>
 
         <div class="search-box">
@@ -1452,5 +1454,6 @@
   </div>
 
   <script src="app.js"></script>
+  <script src="extensions.js"></script>
 </body>
 </html>
