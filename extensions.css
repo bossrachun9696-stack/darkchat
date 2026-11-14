@@ -99,3 +99,20 @@ body[data-mode="light"] .ext-badge.off { background: #e2e8f0; color: #334155; }
 .ext-msg-body { font-size: 0.9rem; line-height: 1.55; white-space: pre-wrap; word-break: break-word; }
 .ext-msg-acts { display: flex; gap: 6px; margin-top: 8px; }
 #ext-notify-modal, #ext-pick-modal { z-index: 1100; }
+
+/* การ์ดคำขอซื้อส่วนขยายในแชท */
+.ext-buy { border-left-color: #fb923c; }
+.ext-buy.st-approved { border-left-color: #34d399; }
+.ext-buy.st-rejected, .ext-buy.st-cancelled { border-left-color: #f87171; opacity: 0.85; }
+.ext-buy-status { margin-left: auto; padding: 3px 10px; border-radius: 999px; font-size: 0.74rem; font-weight: 700; background: rgba(251, 146, 60, 0.3); }
+.ext-buy.st-approved .ext-buy-status { background: rgba(52, 211, 153, 0.35); }
+.ext-buy.st-rejected .ext-buy-status, .ext-buy.st-cancelled .ext-buy-status { background: rgba(248, 113, 113, 0.35); }
+.ext-buy-info { font-size: 0.9rem; margin-bottom: 8px; word-break: break-word; }
+.ext-buy-pay { padding: 10px 12px; border-radius: 14px; background: rgba(255, 255, 255, 0.08); border: 1px dashed var(--border-color); display: flex; flex-direction: column; gap: 6px; align-items: center; }
+.ext-buy-pay-title { align-self: flex-start; font-weight: 700; font-size: 0.86rem; }
+.ext-buy-pay-text { align-self: stretch; font-size: 0.9rem; white-space: pre-wrap; word-break: break-word; }
+.ext-buy-qr { width: min(240px, 100%); border-radius: 12px; background: #fff; cursor: zoom-in; display: block; }
+.ext-ok { border-left-color: #34d399; }
+.ext-no { border-left-color: #f87171; }
+.ext-pay-text { width: 100%; resize: vertical; font-family: inherit; margin-bottom: 8px; }
+.ext-qr-prev { display: flex; justify-content: center; margin-bottom: 8px; }
