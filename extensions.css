@@ -1,0 +1,88 @@
+/* ================= ส่วนขยาย (Extensions) ================= */
+
+/* ไอคอนบนหัวห้องแชท ต่อจากปุ่ม ⋮ */
+.ext-room-icons { display: flex; align-items: center; gap: 2px; margin-left: 2px; padding-left: 6px; border-left: 1px solid var(--border-color); }
+.ext-ico { position: relative; padding: 0; overflow: visible; }
+.ext-ico-img { width: 26px; height: 26px; display: grid; place-items: center; font-size: 1.15rem; line-height: 1; border-radius: 8px; overflow: hidden; }
+.ext-ico-img img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.ext-ico.locked .ext-ico-img { opacity: 0.55; filter: grayscale(0.6); }
+.ext-lock { position: absolute; right: -2px; bottom: -2px; font-size: 0.62rem; line-height: 1; }
+.ext-more { font-size: 0.78rem; font-weight: 700; }
+body.kb-open .ext-ico-img { width: 22px; height: 22px; }
+@media (max-width: 760px) {
+  .ext-room-icons { padding-left: 4px; }
+  .ext-room-icons .icon-btn { width: 32px; height: 32px; }
+}
+
+/* ปุ่มส่วนขยายในแถบด่วน (ต่อจาก "คำขอ") */
+.quick-btn.ext-btn { white-space: nowrap; }
+
+/* หน้าร้าน */
+.ext-panel { width: min(560px, 100%); max-width: 560px; max-height: min(90vh, 820px); overflow-y: auto; display: flex; flex-direction: column; gap: 10px; }
+.ext-top { display: flex; align-items: center; gap: 8px; }
+.ext-top h3 { flex: 1; margin: 0; }
+.ext-add { font-size: 1.4rem; font-weight: 600; color: var(--text-main); background: var(--grad) !important; color: #fff !important; }
+.ext-tabs { margin: 0; }
+.ext-list { display: flex; flex-direction: column; gap: 8px; }
+.ext-card { padding: 12px; border-radius: 18px; background: var(--bg-hover); border: 1px solid var(--border-color); display: flex; flex-direction: column; gap: 8px; }
+.ext-card.hidden-ext { opacity: 0.6; border-style: dashed; }
+.ext-card-head { display: flex; align-items: center; gap: 12px; }
+.ext-card-icon, .ext-big-icon, .ext-mini-icon {
+  flex-shrink: 0; display: grid; place-items: center; overflow: hidden; line-height: 1;
+  background: color-mix(in srgb, var(--accent-color) 18%, var(--bg-solid)); border: 1px solid var(--border-color);
+}
+.ext-card-icon { width: 52px; height: 52px; border-radius: 16px; font-size: 1.7rem; }
+.ext-big-icon { width: 76px; height: 76px; border-radius: 22px; font-size: 2.4rem; margin: 0 auto; }
+.ext-mini-icon { width: 34px; height: 34px; border-radius: 10px; font-size: 1.1rem; }
+.ext-card-icon img, .ext-big-icon img, .ext-mini-icon img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.ext-card-info { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; align-items: flex-start; }
+.ext-card-info strong { font-size: 1rem; word-break: break-word; }
+.ext-badge { padding: 2px 10px; border-radius: 999px; font-size: 0.72rem; font-weight: 700; }
+.ext-badge.free { background: rgba(52, 211, 153, 0.22); color: #6ee7b7; }
+.ext-badge.paid { background: rgba(251, 146, 60, 0.22); color: #fdba74; }
+.ext-badge.trial { background: rgba(96, 165, 250, 0.22); color: #93c5fd; }
+.ext-badge.own { background: rgba(167, 139, 250, 0.24); color: #c4b5fd; }
+.ext-badge.wait { background: rgba(250, 204, 21, 0.22); color: #fde68a; }
+.ext-badge.off { background: rgba(148, 163, 184, 0.26); color: #cbd5e1; }
+body[data-mode="light"] .ext-badge.free { background: #d1fae5; color: #047857; }
+body[data-mode="light"] .ext-badge.paid { background: #ffedd5; color: #c2410c; }
+body[data-mode="light"] .ext-badge.trial { background: #dbeafe; color: #1d4ed8; }
+body[data-mode="light"] .ext-badge.own { background: #ede9fe; color: #6d28d9; }
+body[data-mode="light"] .ext-badge.wait { background: #fef9c3; color: #a16207; }
+body[data-mode="light"] .ext-badge.off { background: #e2e8f0; color: #334155; }
+.ext-desc { font-size: 0.86rem; line-height: 1.5; color: var(--text-muted); white-space: pre-wrap; word-break: break-word; }
+.ext-acts { display: flex; flex-wrap: wrap; gap: 6px; }
+.ext-note { text-align: center; margin-top: 4px; }
+
+/* ผู้ช่วยเลือก */
+.ext-ai { padding: 10px 12px; border-radius: 18px; display: flex; flex-direction: column; gap: 8px;
+  background: color-mix(in srgb, #a855f7 14%, var(--bg-solid)); border: 1px solid color-mix(in srgb, #a855f7 45%, transparent); }
+.ext-ai-head { display: flex; align-items: center; gap: 8px; }
+.ext-ai-head .bo-mini { width: 30px; height: 30px; align-self: center; }
+.ext-ai .inline-form .mini-btn { flex-shrink: 0; }
+.ext-ai-out { display: flex; flex-direction: column; gap: 6px; }
+.ext-ai-out:empty { display: none; }
+.ext-ai-lead { font-size: 0.84rem; }
+.ext-ai-row { display: flex; align-items: center; gap: 10px; padding: 6px 8px; border-radius: 14px; background: var(--bg-hover); }
+.ext-ai-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.ext-ai-text strong { font-size: 0.88rem; }
+.ext-ai-text span { font-size: 0.76rem; color: var(--text-muted); }
+
+/* แจ้งเตือนส่วนขยายเสียเงิน */
+.ext-pay .ext-pay-head h3 { margin: 10px 0 6px; }
+.ext-pay-badge { display: inline-block; padding: 4px 12px; border-radius: 999px; font-size: 0.8rem; font-weight: 700;
+  background: rgba(251, 146, 60, 0.2); border: 1px solid #fb923c; }
+.ext-pay .ext-desc { margin-top: 10px; text-align: left; }
+.ext-price { margin-top: 10px; font-weight: 700; font-size: 1.05rem; }
+
+/* ส่วนขยายของห้อง */
+.ext-room-row { display: flex; align-items: center; gap: 8px; padding: 6px 4px; border-bottom: 1px solid var(--border-color); text-align: left; }
+.ext-room-name { flex: 1; min-width: 0; font-size: 0.9rem; word-break: break-word; }
+
+/* แอดมิน */
+.ext-icon-pick { border: none; background: none; cursor: pointer; padding: 0; margin: 0 auto 4px; display: block; }
+.ext-paid-box { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.ext-paid-box .input-group { margin-bottom: 0; }
+.ext-admin { margin-top: 6px; padding-top: 6px; border-top: 1px dashed var(--border-color); }
+#ext-edit-modal .input-group textarea { min-height: 80px; }
+#ext-modal, #ext-edit-modal, #ext-pay-modal, #ext-room-modal { z-index: 1100; }
