@@ -35,6 +35,7 @@
     icon_too_big: 'รูปไอคอนใหญ่เกินไป',
     ext_not_found: 'ไม่พบส่วนขยายนี้ (อาจถูกปิดไปแล้ว)',
     no_open_request: 'คำขอนี้ถูกจัดการไปแล้ว',
+    qr_too_big: 'รูป QR ใหญ่เกินไป',
     room_not_supported: 'เชื่อมสมุดบ้านได้เฉพาะแชทกลุ่มและแชทสองคน',
     not_in_family: 'คุณไม่ได้เป็นสมาชิกบ้านนี้ในสมุดบ้าน',
     ledger_ext_missing: 'ยังไม่มีส่วนขยายชนิดสมุดบ้าน ให้แอดมินตั้งชนิดในหน้าแก้ไขส่วนขยาย',
@@ -247,6 +248,13 @@
     await refreshAll();
     EXT.lastAdminId = data && data.admin_id;
     await loadAdminId();
+    if (data && data.msg_ok && data.admin_id) {   // ส่งการ์ดคำขอเข้าแชทกับแอดมินแล้ว: พาไปดูวิธีชำระเงินในแชทนั้นเลย
+      closeModal('ext-modal');
+      closeModal('ext-room-modal');
+      await openChatById(data.admin_id);
+      toast('ส่งคำขอซื้อให้แอดมินแล้ว ✅ ดูวิธีชำระเงินในการ์ด โอนแล้วกด "🧾 ส่งสลิป" ในการ์ดได้เลย', 'success');
+      return;
+    }
     boSay(`ขอซื้อส่วนขยาย ${e.name} ฿${e.price}`,
       `ส่งคำขอซื้อส่วนขยาย "${e.name}" (฿${data.price}) ให้แอดมินแล้วครับ ✅\n\n` +
       (data.pay_info ? `วิธีชำระเงิน:\n${data.pay_info}\n\n` : 'แอดมินจะแจ้งวิธีชำระเงินให้ทางข้อความครับ\n\n') +
@@ -396,7 +404,7 @@
     rows.forEach(e => list.appendChild(extCard(e)));
     body.appendChild(list);
 
-    if (isAdmin()) body.appendChild(adminBlock());
+    if (isAdmin()) { body.appendChild(adminBlock()); body.appendChild(adminPayBlock()); }
 
     const note = el('div', 'hint ext-note', 'ส่วนขยายเสียเงินทุกตัวทดลองใช้ฟรีได้ 1 ครั้ง ซื้อแล้วใช้ได้ตลอด ชำระเงินด้วยการโอน แล้วแอดมินตรวจสลิปและเปิดให้ เพิ่มส่วนขยายเข้าห้องแชทได้จากปุ่ม ⋮ ในห้อง');
     body.appendChild(note);
@@ -630,7 +638,11 @@
     }));
     if (!info.links.length) {
       body.appendChild(el('div', 'hint', 'ห้องนี้ยังไม่ได้เชื่อมกับสมุดบ้าน'));
-      if (ledgerExt() && /^(g|d):/.test(key)) body.appendChild(actionBtn('🏠 เชื่อมสมุดบ้านกับห้องนี้', () => { closeModal('ext-notify-modal'); linkLedger(); }, 'secondary-btn'));
+      if (!/^(g|d):/.test(key)) body.appendChild(el('div', 'hint', 'เชื่อมสมุดบ้านได้เฉพาะแชทกลุ่มและแชทสองคน'));
+      else if (ledgerExt()) body.appendChild(actionBtn('🏠 เชื่อมสมุดบ้านกับห้องนี้', () => { closeModal('ext-notify-modal'); linkLedger(); }, 'secondary-btn'));
+      else body.appendChild(el('div', 'hint', isAdmin()
+        ? '⚠️ ยังไม่มีส่วนขยายชนิดสมุดบ้าน: เปิด 🧩 ส่วนขยาย > สมุดบ้าน > ✏️ แก้ไข เลือกชนิด "🏠 สมุดบ้าน (เชื่อมข้อมูล)" แล้วบันทึก'
+        : '⚠️ ยังไม่มีส่วนขยายสมุดบ้านในร้าน ให้แอดมินตั้งค่าก่อน'));
     }
     info.links.forEach(l => {
       body.appendChild(el('div', 'list-title', '🏠 สมุดบ้าน · ' + l.family_name));
@@ -656,6 +668,93 @@
     body.appendChild(close);
   }
 
+  // ---------- การ์ดคำขอซื้อส่วนขยายในแชท (ผู้ซื้อเห็นวิธีชำระเงิน / แอดมินกดอนุมัติ) ----------
+  let payInfoCache = null;
+  async function getPayInfo(force) {
+    if (payInfoCache && !force) return payInfoCache;
+    const { data } = await sb.rpc('ext_pay_info');
+    payInfoCache = data || { text: '', qr: '' };
+    return payInfoCache;
+  }
+  const STATUS_TXT = { requested: 'รอชำระเงิน', approved: 'เปิดใช้งานแล้ว', rejected: 'ไม่อนุมัติ', cancelled: 'ยกเลิกแล้ว' };
+
+  function viewImage(src) {
+    const img = $('viewer-img');
+    if (!img) return window.open(src, '_blank', 'noopener');
+    img.src = src;
+    openModal('image-viewer');
+  }
+
+  function buildPurchaseCard(m) {
+    const meta = m.rmeta || {};
+    const st = meta.status || 'requested';
+    const card = el('div', 'ext-msg ext-buy st-' + st);
+    const head = el('div', 'ext-msg-head');
+    head.appendChild(el('strong', '', '🧩 คำขอซื้อส่วนขยาย'));
+    head.appendChild(el('span', 'ext-buy-status', meta.status_text || STATUS_TXT[st] || ''));
+    card.appendChild(head);
+    card.appendChild(el('div', 'ext-buy-info', `${meta.buyer || 'ผู้ใช้'} · ${meta.ext_name || ''} · ฿${meta.price ?? ''}`));
+    if (st === 'requested') {
+      const pay = el('div', 'ext-buy-pay');
+      pay.appendChild(el('div', 'ext-buy-pay-title', '💳 วิธีชำระเงิน'));
+      const txt = el('div', 'ext-buy-pay-text', 'กำลังโหลด…');
+      pay.appendChild(txt);
+      card.appendChild(pay);
+      getPayInfo().then(info => {
+        txt.textContent = info.text || 'แอดมินจะแจ้งวิธีชำระเงินในแชทนี้';
+        if (info.qr && /^data:image\//.test(info.qr)) {
+          const q = document.createElement('img');
+          q.className = 'ext-buy-qr';
+          q.alt = 'QR สำหรับชำระเงิน';
+          q.src = info.qr;
+          q.onclick = () => viewImage(info.qr);
+          pay.appendChild(q);
+          pay.appendChild(el('div', 'hint', 'แตะรูปเพื่อขยาย กดค้างเพื่อบันทึกรูป'));
+        }
+      }, () => { txt.textContent = 'แอดมินจะแจ้งวิธีชำระเงินในแชทนี้'; });
+      const acts = el('div', 'ext-msg-acts');
+      if (m.isMe) {
+        const slip = chip2('🧾 ส่งสลิป', () => {
+          if (typeof attachPick === 'function') attachPick('media-input'); else toast('กดปุ่ม + แล้วเลือกรูปสลิป', 'info');
+        });
+        slip.className = 'chip primary';
+        acts.appendChild(slip);
+        const c = chip2('ยกเลิกคำขอ', async () => {
+          const ok = await confirmDialog('ยกเลิกคำขอซื้อ', `ยกเลิกคำขอซื้อ ${meta.ext_name || ''}? (ถ้าโอนเงินไปแล้ว ทักแอดมินในแชทนี้)`, 'ยกเลิกคำขอ', true);
+          if (!ok) return;
+          const { error } = await sb.rpc('ext_cancel_purchase', { p_request: meta.request_id });
+          if (error) return extErr(error);
+          toast('ยกเลิกคำขอแล้ว', 'info');
+          refreshAll();
+        });
+        c.classList.add('danger');
+        acts.appendChild(c);
+      } else if (isAdmin()) {
+        const ok = chip2('✅ อนุมัติ (ตรวจสลิปแล้ว)', () => decide({ id: meta.request_id, ext_name: meta.ext_name, nickname: meta.buyer }, true));
+        ok.className = 'chip primary';
+        const no = chip2('ไม่อนุมัติ', () => decide({ id: meta.request_id, ext_name: meta.ext_name, nickname: meta.buyer }, false));
+        no.classList.add('danger');
+        acts.append(ok, no);
+      }
+      card.appendChild(acts);
+    }
+    return card;
+  }
+
+  function buildResultCard(m) {
+    const meta = m.rmeta || {};
+    const card = el('div', 'ext-msg ' + (meta.approved ? 'ext-ok' : 'ext-no'));
+    card.appendChild(el('div', 'ext-msg-body', m.text || ''));
+    if (meta.approved && !m.isMe) {
+      const a = el('div', 'ext-msg-acts');
+      const o = chip2('🧩 ไปที่ส่วนขยาย', () => openExtStore());
+      o.className = 'chip primary';
+      a.appendChild(o);
+      card.appendChild(a);
+    }
+    return card;
+  }
+
   // ---------- ข้อความจากส่วนขยาย (kind = 'ext') แสดงเป็นการ์ด ----------
   function upgradeExtMessages(root) {
     if (typeof findMessage !== 'function') return;
@@ -665,6 +764,13 @@
       try { m = findMessage(row.dataset.id); } catch (x) { m = null; }
       if (!m || m.kind !== 'ext') return;
       const meta = m.rmeta || {};
+      if (meta.ext === 'purchase' || meta.ext === 'purchase_result') {
+        let c;
+        try { c = meta.ext === 'purchase' ? buildPurchaseCard(m) : buildResultCard(m); } catch (x) { console.error('ext card', x); return; }
+        c.dataset.id = m.id;
+        row.replaceWith(c);
+        return;
+      }
       const card = el('div', 'ext-msg ext-msg-' + (meta.type || 'info'));
       card.dataset.id = m.id;
       const head = el('div', 'ext-msg-head');
@@ -870,6 +976,56 @@
     EXT.adminReqs = error ? [] : (data || []);
   }
 
+  function adminPayBlock() {
+    const box = el('div', 'ext-admin');
+    box.appendChild(el('div', 'list-title', '💳 วิธีชำระเงินที่ผู้ซื้อเห็นในการ์ด'));
+    const ta = document.createElement('textarea');
+    ta.className = 'plain-input ext-pay-text';
+    ta.rows = 3;
+    ta.maxLength = 1000;
+    ta.placeholder = 'เช่น พร้อมเพย์ 08x-xxx-xxxx ชื่อบัญชี ... (ใช้ข้อความเดียวกับแพ็กเกจ)';
+    const prev = el('div', 'ext-qr-prev');
+    let qr = null;   // null = ไม่เปลี่ยน
+    const showQr = src => { prev.innerHTML = ''; if (src) { const i = document.createElement('img'); i.src = src; i.className = 'ext-buy-qr'; prev.appendChild(i); } else prev.appendChild(el('span', 'hint', 'ยังไม่มีรูป QR')); };
+    getPayInfo(true).then(info => { ta.value = info.text || ''; showQr(info.qr); });
+    const file = document.createElement('input');
+    file.type = 'file'; file.accept = 'image/*'; file.hidden = true;
+    file.onchange = () => {
+      const f = file.files && file.files[0]; file.value = '';
+      if (!f) return;
+      const url = URL.createObjectURL(f), img = new Image();
+      img.onload = () => {
+        const S = Math.min(700, Math.max(img.width, img.height)), r = S / Math.max(img.width, img.height);
+        const c = document.createElement('canvas'); c.width = Math.round(img.width * r); c.height = Math.round(img.height * r);
+        const ctx = c.getContext('2d'); ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, c.width, c.height); ctx.drawImage(img, 0, 0, c.width, c.height);
+        URL.revokeObjectURL(url);
+        qr = c.toDataURL('image/jpeg', 0.9);
+        showQr(qr);
+      };
+      img.onerror = () => { URL.revokeObjectURL(url); toast('เปิดรูปนี้ไม่ได้', 'error'); };
+      img.src = url;
+    };
+    const row = el('div', 'ext-acts');
+    row.appendChild(chip2('🖼 เลือกรูป QR', () => file.click()));
+    const rm = chip2('ลบรูป QR', () => { qr = ''; showQr(''); });
+    rm.classList.add('danger');
+    row.appendChild(rm);
+    const save = chip2('💾 บันทึก', async () => {
+      const { error: e1 } = await sb.rpc('admin_set_pay_info', { p_text: ta.value });
+      if (e1) return extErr(e1);
+      if (qr !== null) {
+        const { error: e2 } = await sb.rpc('ext_admin_set_pay', { p_text: null, p_qr: qr });
+        if (e2) return extErr(e2);
+      }
+      payInfoCache = null;
+      toast('บันทึกวิธีชำระเงินแล้ว', 'success');
+    });
+    save.className = 'chip primary';
+    row.appendChild(save);
+    box.append(ta, prev, file, row);
+    return box;
+  }
+
   function adminBlock() {
     const box = el('div', 'ext-admin');
     box.appendChild(el('div', 'list-title', `🛠 คำขอซื้อส่วนขยายที่รออยู่ (${EXT.adminReqs.length})`));
@@ -899,9 +1055,9 @@
     if (!ok) return;
     const { error } = await sb.rpc('ext_admin_decide', { p_request: r.id, p_approve: approve });
     if (error) return extErr(error);
-    toast(approve ? 'อนุมัติแล้ว ผู้ซื้อใช้ส่วนขยายได้ทันที' : 'ปฏิเสธคำขอแล้ว', approve ? 'success' : 'info');
+    toast(approve ? 'อนุมัติแล้ว ผู้ซื้อใช้ส่วนขยายได้ทันที และได้ข้อความแจ้งในแชท' : 'ปฏิเสธคำขอแล้ว และแจ้งผู้ซื้อในแชทแล้ว', approve ? 'success' : 'info');
     await loadAdminRequests();
-    renderStore();
+    if (isOpen('ext-modal')) renderStore();
   }
 
   // ---------- เรียลไทม์ ----------
