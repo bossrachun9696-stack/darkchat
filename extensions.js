@@ -34,12 +34,20 @@
     bad_link: 'ลิงก์ต้องขึ้นต้นด้วย https://',
     icon_too_big: 'รูปไอคอนใหญ่เกินไป',
     ext_not_found: 'ไม่พบส่วนขยายนี้ (อาจถูกปิดไปแล้ว)',
-    no_open_request: 'คำขอนี้ถูกจัดการไปแล้ว'
+    no_open_request: 'คำขอนี้ถูกจัดการไปแล้ว',
+    room_not_supported: 'เชื่อมสมุดบ้านได้เฉพาะแชทกลุ่มและแชทสองคน',
+    not_in_family: 'คุณไม่ได้เป็นสมาชิกบ้านนี้ในสมุดบ้าน',
+    ledger_ext_missing: 'ยังไม่มีส่วนขยายชนิดสมุดบ้าน ให้แอดมินตั้งชนิดในหน้าแก้ไขส่วนขยาย',
+    post_failed: 'ส่งข้อความเข้าห้องไม่ได้'
   };
 
   function extErr(error) {
     const msg = (error && error.message) || '';
     for (const k in ERR) if (msg.includes(k)) return toast(ERR[k], 'error');
+    if (/post_failed/.test(msg)) return toast('ส่งข้อความเข้าห้องไม่ได้: ' + msg.replace(/^.*post_failed:\s*/, ''), 'error');
+    if (/ext_ledger|ext_room_mute/.test(msg) && /Could not find the function|does not exist/i.test(msg)) {
+      return toast('ยังไม่ได้ตั้งค่าการเชื่อมสมุดบ้าน: รันไฟล์ supabase-ledger.sql ใน SQL Editor ก่อน', 'error');
+    }
     if (/ext_catalog|room_extensions|ext_room|Could not find the function|does not exist/i.test(msg)) {
       return toast('ยังไม่ได้ตั้งค่าระบบส่วนขยาย: รันไฟล์ supabase-extensions.sql ใน SQL Editor ก่อน', 'error');
     }
@@ -552,6 +560,141 @@
     openModal('ext-room-modal');
   }
 
+  // ---------- สมุดบ้าน: เชื่อมบ้านกับห้อง / ตั้งค่าแจ้งเตือน ----------
+  const ledgerExt = () => EXT.list.find(e => e.kind === 'ledger' && e.active);
+
+  async function linkLedger() {
+    const key = EXT.roomKey;
+    if (!key || !/^(g|d):/.test(key)) return toast('เชื่อมสมุดบ้านได้เฉพาะแชทกลุ่มและแชทสองคน', 'error');
+    const L = ledgerExt();
+    if (!L) return toast('ยังไม่มีส่วนขยายสมุดบ้านในร้าน', 'error');
+    if (!L.can_use) return openPaywall(L.id);
+    const { data, error } = await sb.rpc('ext_ledger_my_families');
+    if (error) return extErr(error);
+    if (!data || !data.length) return toast('คุณยังไม่มีบ้านในสมุดบ้าน: เปิดสมุดบ้านแล้วสร้างหรือเข้าร่วมบ้านก่อน (ใช้อีเมลเดียวกับ DarkChat)', 'error');
+    const pick = async f => {
+      const ok = await confirmDialog('เชื่อมสมุดบ้านกับห้องนี้',
+        `เชื่อมบ้าน "${f.name}" กับห้องนี้?\n\nทุกคนในห้องจะเห็น:\n• แจ้งเตือนเมื่อมีคนแก้ไขรายรับรายจ่าย\n• สรุปประจำวันเวลา 20:00\n• เตือนบิลที่ยังไม่จ่ายก่อนครบกำหนด 3 วัน\n\nปิดหรือเลือกเฉพาะบางอย่างได้ที่ ⋮ > ส่วนขยาย > ตั้งค่าแจ้งเตือนส่วนขยาย`, 'เชื่อม');
+      if (!ok) return;
+      const { error: e2 } = await sb.rpc('ext_ledger_link', { p_room: key, p_family: f.id });
+      if (e2) return extErr(e2);
+      toast('เชื่อมสมุดบ้านกับห้องนี้แล้ว', 'success');
+      await loadRoom();
+    };
+    if (data.length === 1) return pick(data[0]);
+    ensureModal('ext-pick-modal', 'confirm-box');
+    const body = $('ext-pick-modal-body');
+    body.innerHTML = '';
+    body.appendChild(el('h3', '', 'เลือกบ้านที่จะเชื่อม'));
+    const st = el('div', 'stack');
+    data.forEach(f => st.appendChild(actionBtn('🏠 ' + f.name, () => { closeModal('ext-pick-modal'); pick(f); })));
+    st.appendChild(actionBtn('ยกเลิก', () => closeModal('ext-pick-modal')));
+    body.appendChild(st);
+    openModal('ext-pick-modal');
+  }
+
+  function switchRow(title, hint, checked, onChange) {
+    const row = el('div', 'set-row');
+    const t = el('div');
+    t.appendChild(el('strong', '', title));
+    if (hint) t.appendChild(el('span', 'hint', hint));
+    const sw = el('label', 'switch');
+    const cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.checked = !!checked;
+    cb.onchange = async () => { cb.disabled = true; const ok = await onChange(cb.checked); cb.disabled = false; if (ok === false) cb.checked = !cb.checked; };
+    sw.append(cb, el('span', 'slider'));
+    row.append(t, sw);
+    return row;
+  }
+
+  async function openExtNotify() {
+    const key = EXT.roomKey;
+    if (!key) return;
+    ensureModal('ext-notify-modal', '');
+    const body = $('ext-notify-modal-body');
+    body.innerHTML = '';
+    body.appendChild(el('h3', '', '🔔 แจ้งเตือนส่วนขยายของห้องนี้'));
+    body.appendChild(hintNode('กำลังโหลด…'));
+    openModal('ext-notify-modal');
+    const { data, error } = await sb.rpc('ext_ledger_room_info', { p_room: key });
+    body.innerHTML = '';
+    body.appendChild(el('h3', '', '🔔 แจ้งเตือนส่วนขยายของห้องนี้'));
+    if (error) { closeModal('ext-notify-modal'); return extErr(error); }
+    const info = data || { mute_all: false, links: [] };
+    body.appendChild(switchRow('ปิดการแจ้งเตือนส่วนขยายทั้งหมด', 'ส่วนขยายจะไม่ส่งข้อความเข้าห้องนี้ (มีผลกับทุกคนในห้อง)', info.mute_all, async v => {
+      const { error: e } = await sb.rpc('ext_room_mute', { p_room: key, p_mute: v });
+      if (e) { extErr(e); return false; }
+      toast(v ? 'ปิดการแจ้งเตือนส่วนขยายของห้องนี้แล้ว' : 'เปิดการแจ้งเตือนส่วนขยายแล้ว', 'success');
+      return true;
+    }));
+    if (!info.links.length) {
+      body.appendChild(el('div', 'hint', 'ห้องนี้ยังไม่ได้เชื่อมกับสมุดบ้าน'));
+      if (ledgerExt() && /^(g|d):/.test(key)) body.appendChild(actionBtn('🏠 เชื่อมสมุดบ้านกับห้องนี้', () => { closeModal('ext-notify-modal'); linkLedger(); }, 'secondary-btn'));
+    }
+    info.links.forEach(l => {
+      body.appendChild(el('div', 'list-title', '🏠 สมุดบ้าน · ' + l.family_name));
+      const set = (field, v) => sb.rpc('ext_ledger_set', { p_room: key, p_family: l.family_id,
+        p_edits: field === 'e' ? v : null, p_summary: field === 's' ? v : null, p_bills: field === 'b' ? v : null })
+        .then(({ error: e }) => { if (e) { extErr(e); return false; } return true; });
+      body.appendChild(switchRow('แจ้งเมื่อมีคนแก้ไขรายรับรายจ่าย', 'เพิ่ม แก้ ลบรายการ และติ๊กจ่ายบิล', l.notify_edits, v => set('e', v)));
+      body.appendChild(switchRow('สรุปประจำวัน 20:00', 'ใช้อะไรไปบ้าง เงินเหลือเท่าไหร่ บิลที่ยังไม่จ่าย', l.daily_summary, v => set('s', v)));
+      body.appendChild(switchRow('เตือนบิลที่ยังไม่จ่าย', 'เริ่มเตือนก่อนครบกำหนด 3 วัน ยิ่งใกล้ยิ่งถี่ วันครบกำหนดเตือนทุกชั่วโมง', l.bill_reminders, v => set('b', v)));
+      const un = actionBtn('ยกเลิกการเชื่อมบ้านนี้', async () => {
+        const ok = await confirmDialog('ยกเลิกการเชื่อม', `ยกเลิกการเชื่อมบ้าน "${l.family_name}" กับห้องนี้?\nห้องนี้จะไม่ได้รับแจ้งเตือน สรุป และการเตือนบิลจากบ้านนี้อีก`, 'ยกเลิกการเชื่อม', true);
+        if (!ok) return;
+        const { error: e } = await sb.rpc('ext_ledger_unlink', { p_room: key, p_family: l.family_id });
+        if (e) return extErr(e);
+        toast('ยกเลิกการเชื่อมแล้ว', 'info');
+        openExtNotify();
+      }, 'secondary-btn danger');
+      un.style.marginTop = '8px';
+      body.appendChild(un);
+    });
+    const close = actionBtn('ปิด', () => closeModal('ext-notify-modal'), 'primary-btn');
+    close.style.marginTop = '16px';
+    body.appendChild(close);
+  }
+
+  // ---------- ข้อความจากส่วนขยาย (kind = 'ext') แสดงเป็นการ์ด ----------
+  function upgradeExtMessages(root) {
+    if (typeof findMessage !== 'function') return;
+    root.querySelectorAll('.msg-row[data-id]:not([data-ext-done])').forEach(row => {
+      row.dataset.extDone = '1';
+      let m = null;
+      try { m = findMessage(row.dataset.id); } catch (x) { m = null; }
+      if (!m || m.kind !== 'ext') return;
+      const meta = m.rmeta || {};
+      const card = el('div', 'ext-msg ext-msg-' + (meta.type || 'info'));
+      card.dataset.id = m.id;
+      const head = el('div', 'ext-msg-head');
+      const L = ledgerExt();
+      head.appendChild(iconNode(L || { icon: '🏠' }, 'ext-mini-icon'));
+      head.appendChild(el('strong', '', meta.ext === 'ledger' ? 'สมุดบ้าน' : 'ส่วนขยาย'));
+      const tm = el('span', 'ext-msg-time', typeof fmtClock === 'function' ? fmtClock(m.ts) : '');
+      head.appendChild(tm);
+      card.appendChild(head);
+      card.appendChild(el('div', 'ext-msg-body', String(m.text || '').replace(/^(🏠|📌) สมุดบ้าน: /, '$1 ')));
+      if (meta.ext === 'ledger' && L && L.can_use) {
+        const a = el('div', 'ext-msg-acts');
+        const o = chip2('เปิดสมุดบ้าน', () => launch(L.id));
+        o.className = 'chip primary';
+        a.appendChild(o);
+        card.appendChild(a);
+      }
+      row.replaceWith(card);
+    });
+  }
+
+  function watchMessages() {
+    const box = $('messages-container');
+    if (!box || box.dataset.extWatch) return;
+    box.dataset.extWatch = '1';
+    let t = null;
+    new MutationObserver(() => { clearTimeout(t); t = setTimeout(() => upgradeExtMessages(box), 0); }).observe(box, { childList: true, subtree: true });
+    upgradeExtMessages(box);
+  }
+
   // ---------- แอดมิน: เพิ่ม/แก้ไขส่วนขยาย ----------
   let editId = null;
   let editIcon = '';
@@ -614,6 +757,21 @@
     bPaid.onclick = () => setFree(false);
     setFree(free);
 
+    // ชนิดส่วนขยาย: ลิงก์ทั่วไป / สมุดบ้าน (เชื่อมข้อมูลกับห้องแชทได้)
+    let kind = (e && e.kind) || 'link';
+    const kseg = el('div', 'segmented');
+    const kLink = el('button', '', '🔗 ลิงก์ทั่วไป');
+    const kLedger = el('button', '', '🏠 สมุดบ้าน (เชื่อมข้อมูล)');
+    [kLink, kLedger].forEach(b => { b.type = 'button'; });
+    kseg.append(kLink, kLedger);
+    const kHint = el('span', 'hint', '');
+    const setKind = v => { kind = v; kLink.classList.toggle('active', v === 'link'); kLedger.classList.toggle('active', v === 'ledger');
+      kHint.textContent = v === 'ledger' ? 'ห้องที่เพิ่มส่วนขยายนี้ เชื่อมกับบ้านในสมุดบ้านได้: แจ้งเตือนเมื่อแก้ไข สรุป 20:00 และเตือนบิล' : 'กดไอคอนแล้วเปิดลิงก์'; };
+    kLink.onclick = () => setKind('link');
+    kLedger.onclick = () => setKind('ledger');
+    setKind(kind);
+    body.append(el('div', 'list-title', 'ชนิดส่วนขยาย'), kseg, kHint);
+
     let active = e ? e.active : true;
     const row = el('div', 'set-row');
     const lw = el('div');
@@ -631,7 +789,7 @@
       actions.appendChild(del);
     }
     actions.appendChild(actionBtn('ยกเลิก', () => closeModal('ext-edit-modal')));
-    const save = actionBtn('บันทึก', () => saveExt({ free, active, save }), 'primary-btn');
+    const save = actionBtn('บันทึก', () => saveExt({ free, active, save, kind }), 'primary-btn');
     actions.appendChild(save);
     body.appendChild(actions);
     openModal('ext-edit-modal');
@@ -671,7 +829,7 @@
     img.src = url;
   }
 
-  async function saveExt({ free, active, save }) {
+  async function saveExt({ free, active, save, kind }) {
     const name = $('ext-f-name').value.trim();
     const link = $('ext-f-link').value.trim();
     const desc = $('ext-f-desc').value.trim();
@@ -681,10 +839,14 @@
     if (!/^https:\/\//i.test(link)) return toast('ลิงก์ต้องขึ้นต้นด้วย https://', 'error');
     if (!free && price <= 0) return toast('ส่วนขยายเสียเงินต้องตั้งราคามากกว่า 0', 'error');
     if (typeof setBusy === 'function') setBusy(save, true, 'กำลังบันทึก…');
-    const { error } = await sb.rpc('ext_admin_save', {
+    const { data: newId, error } = await sb.rpc('ext_admin_save', {
       p_id: editId, p_name: name, p_icon: editIcon || '🧩', p_link: link, p_description: desc,
       p_is_free: free, p_price: free ? 0 : price, p_trial_days: trial, p_active: active
     });
+    if (!error && kind) {
+      const { error: kErr } = await sb.rpc('ext_admin_set_kind', { p_id: newId || editId, p_kind: kind });
+      if (kErr && kind === 'ledger') toast('บันทึกแล้ว แต่ตั้งชนิดสมุดบ้านไม่ได้: รัน supabase-ledger.sql ก่อน', 'error');
+    }
     if (typeof setBusy === 'function') setBusy(save, false);
     if (error) return extErr(error);
     toast(editId ? 'บันทึกการแก้ไขแล้ว' : 'เพิ่มส่วนขยายแล้ว', 'success');
@@ -787,6 +949,7 @@
   async function onEnter() {
     if (!currentUser) return;
     injectStatic();
+    watchMessages();
     await loadCatalog();
     if (!EXT.ready) return;
     try { EXT.adminId = localStorage.getItem('darkchat_ext_admin') || null; } catch (x) { /* ไม่เป็นไร */ }
@@ -831,6 +994,9 @@
     const usable = EXT.list.filter(e => e.active && e.can_use && !EXT.roomExt.includes(e.id));
     usable.forEach(e => go(`➕ เพิ่ม ${e.name} เข้าห้อง`, () => addToRoom(e.id)));
     if (inRoom.length) go(`จัดการส่วนขยายในห้อง (${inRoom.length})`, openRoomExtSheet);
+    const L = ledgerExt();
+    if (L && EXT.roomKey && /^(g|d):/.test(EXT.roomKey)) go(L.can_use ? '🏠 เชื่อมสมุดบ้านกับห้องนี้' : '🔒 เชื่อมสมุดบ้านกับห้องนี้ (ต้องซื้อหรือทดลองใช้)', linkLedger);
+    go('🔔 ตั้งค่าแจ้งเตือนส่วนขยาย', openExtNotify);
     go(usable.length ? '🛒 ร้านส่วนขยาย (ซื้อเพิ่ม)' : '🛒 ร้านส่วนขยาย', () => openExtStore());
     det.appendChild(body);
     const closeBtn = box.lastElementChild;   // ปุ่ม "ปิด" อยู่ท้ายสุด
@@ -839,6 +1005,7 @@
 
   window.openExtStore = openExtStore;
   window.openRoomExtSheet = openRoomExtSheet;
+  window.openExtNotify = openExtNotify;
 
   // เผื่อสคริปต์นี้โหลดหลังจากล็อกอินไปแล้ว
   if (typeof currentUser !== 'undefined' && currentUser) onEnter();
