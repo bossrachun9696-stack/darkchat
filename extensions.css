@@ -86,3 +86,16 @@ body[data-mode="light"] .ext-badge.off { background: #e2e8f0; color: #334155; }
 .ext-admin { margin-top: 6px; padding-top: 6px; border-top: 1px dashed var(--border-color); }
 #ext-edit-modal .input-group textarea { min-height: 80px; }
 #ext-modal, #ext-edit-modal, #ext-pay-modal, #ext-room-modal { z-index: 1100; }
+
+/* การ์ดข้อความจากส่วนขยาย (สมุดบ้าน) */
+.ext-msg { align-self: center; width: min(520px, 94%); margin: 4px 0; padding: 10px 14px 12px; border-radius: 18px;
+  background: var(--bg-hover); border: 1px solid var(--border-color); border-left: 5px solid #34d399; }
+.ext-msg-bills { border-left-color: #fb923c; }
+.ext-msg-summary { border-left-color: #60a5fa; }
+.ext-msg-linked { border-left-color: #a78bfa; }
+.ext-msg-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+.ext-msg-head .ext-mini-icon { width: 26px; height: 26px; border-radius: 8px; font-size: 0.95rem; }
+.ext-msg-time { margin-left: auto; font-size: 0.72rem; opacity: 0.7; }
+.ext-msg-body { font-size: 0.9rem; line-height: 1.55; white-space: pre-wrap; word-break: break-word; }
+.ext-msg-acts { display: flex; gap: 6px; margin-top: 8px; }
+#ext-notify-modal, #ext-pick-modal { z-index: 1100; }
