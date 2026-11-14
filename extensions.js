@@ -61,6 +61,7 @@
     if (text !== undefined) n.textContent = text;
     return n;
   };
+  const closeM = id => { if ($(id)) closeModal(id); };
   const isAdmin = () => typeof isAdminUser === 'function' && isAdminUser();
   const byId = id => EXT.list.find(e => e.id === id);
 
@@ -207,12 +208,12 @@
       st.appendChild(actionBtn(`🎁 ทดลองใช้ฟรี ${e.trial_days} วัน`, () => startTrial(e.id, true), 'primary-btn'));
     }
     if (e.pending_request) {
-      st.appendChild(el('div', 'hint', 'ส่งคำขอซื้อแล้ว รอแอดมินตรวจสลิปและเปิดให้'));
-      st.appendChild(actionBtn('🧾 ส่งสลิปให้แอดมิน', () => sendSlipToAdmin(e), 'secondary-btn'));
+      st.appendChild(el('div', 'hint', e.pending_status === 'slip_sent' ? 'ส่งสลิปแล้ว รอแอดมินตรวจและเปิดให้' : 'ส่งคำขอซื้อแล้ว รอโอนเงินและส่งสลิป'));
+      st.appendChild(actionBtn('🧾 ส่งสลิป', () => startExtSlip(e.pending_request), 'secondary-btn'));
     } else {
       st.appendChild(actionBtn(`🛒 ซื้อ ฿${e.price}`, () => buy(e.id), e.trial_used ? 'primary-btn' : 'secondary-btn'));
     }
-    st.appendChild(actionBtn('ปิด', () => closeModal('ext-pay-modal')));
+    st.appendChild(actionBtn('ปิด', () => closeM('ext-pay-modal')));
     body.appendChild(st);
     openModal('ext-pay-modal');
   }
@@ -225,7 +226,7 @@
     const { data, error } = await sb.rpc('ext_start_trial', { p_ext: id });
     if (error) return extErr(error);
     toast(`เริ่มทดลองใช้ ${e.name} แล้ว ใช้ได้ถึง ${fmtDate(data)}`, 'success');
-    closeModal('ext-pay-modal');
+    closeM('ext-pay-modal');
     await refreshAll();
     if (launchAfter) launch(id);
   }
@@ -244,21 +245,16 @@
     if (!ok) return;
     const { data, error } = await sb.rpc('ext_request_purchase', { p_ext: id });
     if (error) return extErr(error);
-    closeModal('ext-pay-modal');
+    closeM('ext-pay-modal');
     await refreshAll();
     EXT.lastAdminId = data && data.admin_id;
     await loadAdminId();
-    if (data && data.msg_ok && data.admin_id) {   // ส่งการ์ดคำขอเข้าแชทกับแอดมินแล้ว: พาไปดูวิธีชำระเงินในแชทนั้นเลย
-      closeModal('ext-modal');
-      closeModal('ext-room-modal');
-      await openChatById(data.admin_id);
-      toast('ส่งคำขอซื้อให้แอดมินแล้ว ✅ ดูวิธีชำระเงินในการ์ด โอนแล้วกด "🧾 ส่งสลิป" ในการ์ดได้เลย', 'success');
-      return;
-    }
+    await loadMyReqs();
+    closeM('ext-room-modal');
     boSay(`ขอซื้อส่วนขยาย ${e.name} ฿${e.price}`,
-      `ส่งคำขอซื้อส่วนขยาย "${e.name}" (฿${data.price}) ให้แอดมินแล้วครับ ✅\n\n` +
+      `ส่งคำขอซื้อส่วนขยาย ${e.name} (ซื้อครั้งเดียวใช้ได้ตลอด ฿${data.price}) ให้แอดมินแล้วครับ ✅\n\n` +
       (data.pay_info ? `วิธีชำระเงิน:\n${data.pay_info}\n\n` : 'แอดมินจะแจ้งวิธีชำระเงินให้ทางข้อความครับ\n\n') +
-      'โอนเสร็จแล้ว เปิดหน้า 🧩 ส่วนขยาย แล้วกด "🧾 ส่งสลิปให้แอดมิน" ที่ส่วนขยายนี้ ระบบจะเปิดแชทกับแอดมินให้ส่งรูปสลิป แอดมินตรวจแล้วจะเปิดใช้งานให้ครับ');
+      'โอนเสร็จแล้ว กดปุ่ม "🧾 ส่งสลิป" ด้านล่าง แล้วเลือกรูปสลิป น้องจะส่งต่อให้แอดมิน แอดมินตรวจแล้วจะเปิดใช้งานให้และแจ้งทางแชทครับ');
   }
 
   // ให้น้องโบ๊ะบ๊ะพูดในแชทของน้อง (ข้อความในเครื่อง ไม่เรียก AI)
@@ -266,29 +262,105 @@
     if (typeof bo === 'undefined' || !bo || !Array.isArray(bo.msgs)) { toast(botText, 'success'); return; }
     if (userText) bo.msgs.push({ role: 'user', text: userText });
     bo.msgs.push({ role: 'model', local: true, text: botText });
+    attachQrToLastBo();
     try { saveBoHistory(); } catch (x) { /* ไม่เป็นไร */ }
-    closeModal('ext-modal');
+    closeM('ext-modal');
     openModal('bo-modal');
     try { if (typeof hideBoBubble === 'function') hideBoBubble(false); renderBoChat(); } catch (x) { /* ไม่เป็นไร */ }
   }
 
-  async function sendSlipToAdmin(e) {
-    let adminId = EXT.lastAdminId || EXT.adminId;
-    if (!adminId) {   // เครื่องนี้ยังไม่รู้ไอดีแอดมิน: ถามจากคำขอซื้อที่มีอยู่ (ไม่สร้างคำขอซ้ำ)
-      const { data } = await sb.rpc('ext_request_purchase', { p_ext: e.id });
-      if (data && data.admin_id) { EXT.lastAdminId = data.admin_id; await loadAdminId(); adminId = data.admin_id; }
+  // แนบรูป QR ชำระเงินไว้ในข้อความวิธีชำระเงินของน้อง (ทั้งส่วนขยายและแพ็กเกจ)
+  async function attachQrToLastBo() {
+    if (typeof bo === 'undefined' || !bo || !Array.isArray(bo.msgs)) return;
+    const m = [...bo.msgs].reverse().find(x => x.role === 'model');
+    if (!m || !/วิธีชำระเงิน/.test(m.text || '') || (m.files && m.files.length)) return;
+    let info = null;
+    try { info = await getPayInfo(true); } catch (x) { return; }
+    if (!info || !/^data:image\//.test(info.qr || '')) return;
+    m.files = [{ name: 'QR ชำระเงิน.jpg', kind: 'image', thumb: info.qr }];
+    m.text = m.text.replace('โอนเสร็จแล้ว', 'หรือสแกน QR ด้านบน (แตะเพื่อขยาย กดค้างเพื่อบันทึก)\n\nโอนเสร็จแล้ว');
+    try { saveBoHistory(); renderBoChat(); } catch (x) { /* ไม่เป็นไร */ }
+  }
+
+  // ---------- ส่งสลิปผ่านน้องโบ๊ะบ๊ะ (เหมือนแพ็กเกจ) ----------
+  EXT.myReqs = [];
+  async function loadMyReqs() {
+    const { data, error } = await sb.rpc('ext_my_requests');
+    EXT.myReqs = error ? [] : (data || []);
+    try { if (isOpen('bo-modal')) renderSlipBar(); } catch (x) { /* ไม่เป็นไร */ }
+  }
+  function slipInput() {
+    let f = $('ext-slip-file');
+    if (f) return f;
+    f = document.createElement('input');
+    f.type = 'file'; f.accept = 'image/*'; f.hidden = true; f.id = 'ext-slip-file';
+    f.onchange = () => onExtSlip(f);
+    document.body.appendChild(f);
+    return f;
+  }
+  // ต้องเปิดตัวเลือกไฟล์ในการกดครั้งเดียว (มือถือถึงจะยอม) แล้วค่อยพาไปแชทน้อง
+  function startExtSlip(reqId) {
+    EXT.slipFor = reqId;
+    slipInput().click();
+    closeM('ext-modal');
+    closeM('ext-pay-modal');
+    openModal('bo-modal');
+    try { renderBoChat(); } catch (x) { /* ไม่เป็นไร */ }
+  }
+  async function onExtSlip(input) {
+    const f = input.files && input.files[0];
+    input.value = '';
+    const id = EXT.slipFor;
+    if (!f || !id) return;
+    if (!(f.type || '').startsWith('image/')) return toast('ส่งสลิปได้เฉพาะไฟล์รูปภาพ', 'error');
+    const r = EXT.myReqs.find(x => x.id === id) || {};
+    const hasBo = typeof bo !== 'undefined' && bo && Array.isArray(bo.msgs);
+    const pending = { role: 'model', text: 'กำลังส่งสลิปให้แอดมิน…', streaming: true };
+    let me = null;
+    if (hasBo) { bo.msgs.push({ role: 'user', text: `🧾 ส่งสลิปการโอน (ส่วนขยาย ${r.ext_name || ''})`, files: [] }); me = bo.msgs[bo.msgs.length - 1]; bo.msgs.push(pending); renderBoChat(); }
+    try {
+      const { b64, thumb, w, h } = await aiImageToJpeg(f, 1600, 0.86);
+      if (me) me.files = [{ name: 'สลิป.jpg', kind: 'image', thumb }];
+      const main = b64ToBlob(b64, 'image/jpeg');
+      const th = dataUrlToBlobSync(thumb);
+      const path = mediaPath('jpg');
+      const tpath = path.replace(/\.jpg$/, '_t.jpg');
+      await uploadObject(path, main, 'image/jpeg');
+      await uploadObject(tpath, th, 'image/jpeg');
+      const { error } = await sb.rpc('ext_submit_slip', { p_request: id, p_media: { path, thumb: tpath, size: main.size, thumb_size: th.size, w, h } });
+      if (error) throw error;
+      pending.text = 'ได้รับสลิปแล้ว และส่งต่อให้แอดมินเรียบร้อยครับ ✅ รอแอดมินตรวจและเปิดใช้งานให้ จะมีข้อความแจ้งในแชทกับแอดมิน (app_creator) และที่นี่ครับ';
+      pending.local = true;
+      if (!hasBo) toast('ส่งสลิปให้แอดมินแล้ว ✅', 'success');
+    } catch (e) {
+      const m = (e && e.message) || '';
+      pending.text = /no_open_request/.test(m) ? 'คำขอซื้อนี้ปิดไปแล้ว (เปิดใช้งานแล้วหรือถูกยกเลิก)'
+        : /too_many_slips/.test(m) ? 'ส่งสลิปครบ 5 ใบสำหรับคำขอนี้แล้ว โปรดติดต่อแอดมิน'
+        : /no_admin/.test(m) ? 'ยังไม่พบบัญชีแอดมิน ให้แอดมินเปิดหน้าส่วนขยายสักครั้งก่อน'
+        : 'ส่งสลิปไม่สำเร็จ ลองใหม่อีกครั้ง';
+      pending.err = true;
+      if (!hasBo) toast(pending.text, 'error');
     }
-    closeModal('ext-pay-modal');
-    closeModal('ext-modal');
-    if (!adminId) return toast('ยังไม่พบบัญชีแอดมิน ให้แอดมินเปิดหน้าส่วนขยายสักครั้งก่อน', 'error');
-    openChatById(adminId).then(() => {
-      const box = $('message-input');
-      if (box && !box.value) {
-        box.value = `ขอซื้อส่วนขยาย "${e.name}" ฿${e.price} แนบสลิปการโอนครับ`;
-        box.dispatchEvent(new Event('input', { bubbles: true }));
-      }
-      toast('กดปุ่ม + แล้วเลือกรูปสลิปเพื่อส่งให้แอดมิน', 'info');
+    pending.streaming = false;
+    await loadMyReqs();
+    await refreshAll();
+    if (hasBo) { try { saveBoHistory(); renderBoChat(); } catch (x) { /* ไม่เป็นไร */ } }
+  }
+  // แถบส่งสลิปในแชทน้อง: ต่อท้ายแถบของแพ็กเกจ
+  function extSlipRows() {
+    const bar = $('bo-slip-bar');
+    if (!bar || isAdmin()) return;
+    bar.querySelectorAll('.ext-slip-row').forEach(n => n.remove());
+    (EXT.myReqs || []).forEach(r => {
+      const row = el('div', 'slip-row ext-slip-row');
+      row.appendChild(el('span', '', `🧩 ${r.ext_name} · ส่วนขยาย ฿${r.price} · ${r.status === 'slip_sent' ? 'ส่งสลิปแล้ว รอแอดมินเปิดให้' : 'รอโอนเงินและส่งสลิป'}`));
+      const b1 = chip2(r.status === 'slip_sent' ? '🧾 ส่งสลิปเพิ่ม' : '🧾 ส่งสลิป', () => { EXT.slipFor = r.id; slipInput().click(); });
+      b1.className = 'chip primary';
+      const b2 = chip2('ยกเลิกคำขอ', () => cancelRequest({ name: r.ext_name, pending_request: r.id }));
+      row.append(b1, b2);
+      bar.appendChild(row);
     });
+    if ((EXT.myReqs || []).length) bar.classList.remove('hidden-element');
   }
 
   async function cancelRequest(e) {
@@ -296,6 +368,7 @@
     if (!ok) return;
     const { error } = await sb.rpc('ext_cancel_purchase', { p_request: e.pending_request });
     if (error) return extErr(error);
+    await loadMyReqs();
     await refreshAll();
   }
 
@@ -311,6 +384,7 @@
       await loadAdminRequests();
     }
     await loadAdminId();
+    try { if (hasPackages()) await Promise.all([loadEntitlements(), loadMyPurchase()]); } catch (x) { /* ไม่เป็นไร */ }
     renderStore();
     if (focusAi) setTimeout(() => { const i = $('ext-ai-input'); if (i) i.focus(); }, 50);
   }
@@ -342,7 +416,7 @@
     const x = el('button', 'icon-btn', '✕');
     x.type = 'button';
     x.setAttribute('aria-label', 'ปิด');
-    x.onclick = () => closeModal('ext-modal');
+    x.onclick = () => closeM('ext-modal');
     top.appendChild(x);
     body.appendChild(top);
 
@@ -398,16 +472,62 @@
       if (EXT.tab === 'mine') return !e.is_free && (e.license_kind || e.pending_request);
       return true;
     });
-    if (!rows.length) {
+    if (!rows.length && !pkgCards(EXT.tab).length) {
       list.appendChild(hintNode(EXT.list.length ? 'ไม่มีส่วนขยายในหมวดนี้' : (isAdmin() ? 'ยังไม่มีส่วนขยาย กดปุ่ม + เพื่อเพิ่มตัวแรก' : 'ยังไม่มีส่วนขยาย')));
     }
+    const pkgs = pkgCards(EXT.tab);
+    if (pkgs.length) { list.appendChild(el('div', 'list-title', '⭐ แพ็กเกจ')); pkgs.forEach(c => list.appendChild(c)); }
+    if (pkgs.length && rows.length) list.appendChild(el('div', 'list-title', '🧩 ส่วนขยาย'));
     rows.forEach(e => list.appendChild(extCard(e)));
     body.appendChild(list);
 
     if (isAdmin()) { body.appendChild(adminBlock()); body.appendChild(adminPayBlock()); }
 
-    const note = el('div', 'hint ext-note', 'ส่วนขยายเสียเงินทุกตัวทดลองใช้ฟรีได้ 1 ครั้ง ซื้อแล้วใช้ได้ตลอด ชำระเงินด้วยการโอน แล้วแอดมินตรวจสลิปและเปิดให้ เพิ่มส่วนขยายเข้าห้องแชทได้จากปุ่ม ⋮ ในห้อง');
+    const note = el('div', 'hint ext-note', 'ซื้อแพ็กเกจและส่วนขยายผ่านน้องโบ๊ะบ๊ะ: กดซื้อ แล้วโอนตามวิธีชำระเงิน กด "🧾 ส่งสลิป" ในแชทน้อง แอดมินตรวจแล้วเปิดให้ · ส่วนขยายเสียเงินทุกตัวทดลองใช้ฟรีได้ 1 ครั้ง ซื้อแล้วใช้ได้ตลอด · เพิ่มส่วนขยายเข้าห้องได้จากปุ่ม ⋮ ในห้อง');
     body.appendChild(note);
+  }
+
+  // ---------- แพ็กเกจ (AI / สตรีม) ในร้าน: ซื้อผ่านน้องโบ๊ะบ๊ะแบบเดิม ----------
+  function hasPackages() { return typeof PRODUCTS === 'object' && PRODUCTS && typeof buyPackage === 'function'; }
+  function pkgCards(tab) {
+    if (!hasPackages() || tab === 'free') return [];
+    const pend = (typeof bo !== 'undefined' && bo && bo.purchases) || [];
+    return Object.keys(PRODUCTS).filter(p => {
+      if (tab !== 'mine') return true;
+      const e = state.ent && state.ent[p];
+      return (e && e.active && !e.admin) || pend.some(r => r.product === p);
+    }).map(p => {
+      const pr = PRODUCTS[p], ent = state.ent && state.ent[p], open = pend.find(r => r.product === p);
+      const card = el('div', 'ext-card ext-pkg');
+      const head = el('div', 'ext-card-head');
+      const ic = el('span', 'ext-card-icon', pr.icon);
+      head.appendChild(ic);
+      const info = el('div', 'ext-card-info');
+      info.appendChild(el('strong', '', 'แพ็กเกจ ' + pr.name));
+      const active = ent && ent.active;
+      info.appendChild(el('span', 'ext-badge ' + (active ? 'own' : open ? 'wait' : 'paid'),
+        typeof entLabel === 'function' && state.ent ? (active ? entLabel(p) : open ? (open.status === 'slip_sent' ? 'ส่งสลิปแล้ว รอเปิดให้' : 'รอโอนเงิน') : `฿${PRICES.monthly}/เดือน · ฿${PRICES.lifetime} ตลอดชีพ`) : 'แพ็กเกจ'));
+      head.appendChild(info);
+      card.appendChild(head);
+      card.appendChild(el('div', 'ext-desc', pr.desc));
+      const acts = el('div', 'ext-acts');
+      if (ent && ent.admin) acts.appendChild(el('span', 'hint', 'แอดมินใช้ได้ทุกอย่าง'));
+      else {
+        if (open) {
+          const s1 = chip2(open.status === 'slip_sent' ? '🧾 ส่งสลิปเพิ่ม' : '🧾 ส่งสลิป', () => { closeM('ext-modal'); startSlip(open.id); });
+          s1.className = 'chip primary';
+          acts.appendChild(s1);
+        }
+        ['monthly', 'lifetime'].forEach(plan => {
+          if (active && ent.lifetime) return;
+          const b = chip2(`${active && plan === 'monthly' ? 'ต่ออายุ 1 เดือน' : PLAN_NAMES[plan]} ฿${PRICES[plan]}`, () => { closeM('ext-modal'); buyPackage(p, plan); });
+          if (plan === 'lifetime' && !open) b.className = 'chip primary';
+          acts.appendChild(b);
+        });
+      }
+      card.appendChild(acts);
+      return card;
+    });
   }
 
   function statusText(e) {
@@ -416,7 +536,7 @@
     if (isAdmin()) return { t: 'แอดมิน · ฿' + e.price, c: 'own' };
     if (e.license_kind === 'paid' || e.license_kind === 'granted') return { t: 'ซื้อแล้ว', c: 'own' };
     if (e.license_kind === 'trial' && e.can_use) return { t: `ทดลองเหลือ ${daysLeft(e.expires_at)} วัน`, c: 'trial' };
-    if (e.pending_request) return { t: 'รอแอดมินตรวจ', c: 'wait' };
+    if (e.pending_request) return { t: e.pending_status === 'slip_sent' ? 'ส่งสลิปแล้ว รอเปิดให้' : 'รอโอนเงิน', c: 'wait' };
     if (e.license_kind === 'trial') return { t: 'หมดเวลาทดลอง · ฿' + e.price, c: 'paid' };
     return { t: '฿' + e.price, c: 'paid' };
   }
@@ -447,7 +567,7 @@
     }
     if (!e.is_free && !isAdmin() && !(e.license_kind === 'paid' || e.license_kind === 'granted')) {
       if (e.pending_request) {
-        acts.appendChild(chip2('🧾 ส่งสลิปให้แอดมิน', () => sendSlipToAdmin(e)));
+        acts.appendChild(chip2(e.pending_status === 'slip_sent' ? '🧾 ส่งสลิปเพิ่ม' : '🧾 ส่งสลิป', () => startExtSlip(e.pending_request)));
         const c = chip2('ยกเลิกคำขอ', () => cancelRequest(e));
         c.classList.add('danger');
         acts.appendChild(c);
@@ -539,9 +659,9 @@
         const row = el('div', 'ext-room-row');
         row.appendChild(iconNode(e, 'ext-mini-icon'));
         row.appendChild(el('span', 'ext-room-name', e.name + (e.can_use ? '' : ' 🔒')));
-        const o = chip2('เปิด', () => { closeModal('ext-room-modal'); launch(e.id); });
+        const o = chip2('เปิด', () => { closeM('ext-room-modal'); launch(e.id); });
         o.className = 'chip primary';
-        const r = chip2('เอาออก', () => { closeModal('ext-room-modal'); removeFromRoom(e.id); });
+        const r = chip2('เอาออก', () => { closeM('ext-room-modal'); removeFromRoom(e.id); });
         r.classList.add('danger');
         row.append(o, r);
         st.appendChild(row);
@@ -556,14 +676,14 @@
         const row = el('div', 'ext-room-row');
         row.appendChild(iconNode(e, 'ext-mini-icon'));
         row.appendChild(el('span', 'ext-room-name', e.name));
-        const a = chip2('➕ เพิ่ม', () => { closeModal('ext-room-modal'); addToRoom(e.id); });
+        const a = chip2('➕ เพิ่ม', () => { closeM('ext-room-modal'); addToRoom(e.id); });
         a.className = 'chip primary';
         row.appendChild(a);
         st.appendChild(row);
       });
     }
-    st.appendChild(actionBtn('🛒 ไปที่ร้านส่วนขยาย', () => { closeModal('ext-room-modal'); openExtStore(); }));
-    st.appendChild(actionBtn('ปิด', () => closeModal('ext-room-modal')));
+    st.appendChild(actionBtn('🛒 ไปที่ร้านส่วนขยาย', () => { closeM('ext-room-modal'); openExtStore(); }));
+    st.appendChild(actionBtn('ปิด', () => closeM('ext-room-modal')));
     body.appendChild(st);
     openModal('ext-room-modal');
   }
@@ -595,8 +715,8 @@
     body.innerHTML = '';
     body.appendChild(el('h3', '', 'เลือกบ้านที่จะเชื่อม'));
     const st = el('div', 'stack');
-    data.forEach(f => st.appendChild(actionBtn('🏠 ' + f.name, () => { closeModal('ext-pick-modal'); pick(f); })));
-    st.appendChild(actionBtn('ยกเลิก', () => closeModal('ext-pick-modal')));
+    data.forEach(f => st.appendChild(actionBtn('🏠 ' + f.name, () => { closeM('ext-pick-modal'); pick(f); })));
+    st.appendChild(actionBtn('ยกเลิก', () => closeM('ext-pick-modal')));
     body.appendChild(st);
     openModal('ext-pick-modal');
   }
@@ -628,7 +748,7 @@
     const { data, error } = await sb.rpc('ext_ledger_room_info', { p_room: key });
     body.innerHTML = '';
     body.appendChild(el('h3', '', '🔔 แจ้งเตือนส่วนขยายของห้องนี้'));
-    if (error) { closeModal('ext-notify-modal'); return extErr(error); }
+    if (error) { closeM('ext-notify-modal'); return extErr(error); }
     const info = data || { mute_all: false, links: [] };
     body.appendChild(switchRow('ปิดการแจ้งเตือนส่วนขยายทั้งหมด', 'ส่วนขยายจะไม่ส่งข้อความเข้าห้องนี้ (มีผลกับทุกคนในห้อง)', info.mute_all, async v => {
       const { error: e } = await sb.rpc('ext_room_mute', { p_room: key, p_mute: v });
@@ -639,7 +759,7 @@
     if (!info.links.length) {
       body.appendChild(el('div', 'hint', 'ห้องนี้ยังไม่ได้เชื่อมกับสมุดบ้าน'));
       if (!/^(g|d):/.test(key)) body.appendChild(el('div', 'hint', 'เชื่อมสมุดบ้านได้เฉพาะแชทกลุ่มและแชทสองคน'));
-      else if (ledgerExt()) body.appendChild(actionBtn('🏠 เชื่อมสมุดบ้านกับห้องนี้', () => { closeModal('ext-notify-modal'); linkLedger(); }, 'secondary-btn'));
+      else if (ledgerExt()) body.appendChild(actionBtn('🏠 เชื่อมสมุดบ้านกับห้องนี้', () => { closeM('ext-notify-modal'); linkLedger(); }, 'secondary-btn'));
       else body.appendChild(el('div', 'hint', isAdmin()
         ? '⚠️ ยังไม่มีส่วนขยายชนิดสมุดบ้าน: เปิด 🧩 ส่วนขยาย > สมุดบ้าน > ✏️ แก้ไข เลือกชนิด "🏠 สมุดบ้าน (เชื่อมข้อมูล)" แล้วบันทึก'
         : '⚠️ ยังไม่มีส่วนขยายสมุดบ้านในร้าน ให้แอดมินตั้งค่าก่อน'));
@@ -663,7 +783,7 @@
       un.style.marginTop = '8px';
       body.appendChild(un);
     });
-    const close = actionBtn('ปิด', () => closeModal('ext-notify-modal'), 'primary-btn');
+    const close = actionBtn('ปิด', () => closeM('ext-notify-modal'), 'primary-btn');
     close.style.marginTop = '16px';
     body.appendChild(close);
   }
@@ -688,13 +808,27 @@
   function buildPurchaseCard(m) {
     const meta = m.rmeta || {};
     const st = meta.status || 'requested';
+    const open = st === 'requested' || st === 'slip_sent';
     const card = el('div', 'ext-msg ext-buy st-' + st);
     const head = el('div', 'ext-msg-head');
-    head.appendChild(el('strong', '', '🧩 คำขอซื้อส่วนขยาย'));
+    head.appendChild(el('strong', '', meta.slip ? '🧾 สลิปการโอน' : '🧩 คำขอซื้อส่วนขยาย'));
     head.appendChild(el('span', 'ext-buy-status', meta.status_text || STATUS_TXT[st] || ''));
     card.appendChild(head);
-    card.appendChild(el('div', 'ext-buy-info', `${meta.buyer || 'ผู้ใช้'} · ${meta.ext_name || ''} · ฿${meta.price ?? ''}`));
-    if (st === 'requested') {
+    card.appendChild(el('div', 'ext-buy-info', `${meta.buyer || 'ผู้ใช้'} · ส่วนขยาย ${meta.ext_name || ''} · ซื้อครั้งเดียวใช้ได้ตลอด · ฿${meta.price ?? ''}`));
+    if (meta.slip && m.media && m.media.path && typeof buildMediaEl === 'function') {
+      try { card.appendChild(buildMediaEl(m)); } catch (x) { console.error('slip media', x); }
+    }
+    if (open && isAdmin() && !m.isMe) {
+      const acts = el('div', 'ext-msg-acts');
+      const ok = chip2('✅ อนุมัติ เปิดใช้งาน (ตรวจสลิปแล้ว)', () => decide({ id: meta.request_id, ext_name: meta.ext_name, nickname: meta.buyer }, true));
+      ok.className = 'chip primary';
+      const no = chip2('ไม่อนุมัติ', () => decide({ id: meta.request_id, ext_name: meta.ext_name, nickname: meta.buyer }, false));
+      no.classList.add('danger');
+      acts.append(ok, no);
+      card.appendChild(acts);
+      return card;
+    }
+    if (st === 'requested' && !meta.slip && m.isMe) {
       const pay = el('div', 'ext-buy-pay');
       pay.appendChild(el('div', 'ext-buy-pay-title', '💳 วิธีชำระเงิน'));
       const txt = el('div', 'ext-buy-pay-text', 'กำลังโหลด…');
@@ -714,9 +848,7 @@
       }, () => { txt.textContent = 'แอดมินจะแจ้งวิธีชำระเงินในแชทนี้'; });
       const acts = el('div', 'ext-msg-acts');
       if (m.isMe) {
-        const slip = chip2('🧾 ส่งสลิป', () => {
-          if (typeof attachPick === 'function') attachPick('media-input'); else toast('กดปุ่ม + แล้วเลือกรูปสลิป', 'info');
-        });
+        const slip = chip2('🧾 ส่งสลิป', () => startExtSlip(meta.request_id));
         slip.className = 'chip primary';
         acts.appendChild(slip);
         const c = chip2('ยกเลิกคำขอ', async () => {
@@ -894,7 +1026,7 @@
       const del = actionBtn('ลบ', () => deleteExt(e), 'secondary-btn danger');
       actions.appendChild(del);
     }
-    actions.appendChild(actionBtn('ยกเลิก', () => closeModal('ext-edit-modal')));
+    actions.appendChild(actionBtn('ยกเลิก', () => closeM('ext-edit-modal')));
     const save = actionBtn('บันทึก', () => saveExt({ free, active, save, kind }), 'primary-btn');
     actions.appendChild(save);
     body.appendChild(actions);
@@ -956,7 +1088,7 @@
     if (typeof setBusy === 'function') setBusy(save, false);
     if (error) return extErr(error);
     toast(editId ? 'บันทึกการแก้ไขแล้ว' : 'เพิ่มส่วนขยายแล้ว', 'success');
-    closeModal('ext-edit-modal');
+    closeM('ext-edit-modal');
     await refreshAll();
   }
 
@@ -966,7 +1098,7 @@
     const { error } = await sb.rpc('ext_admin_delete', { p_id: e.id });
     if (error) return extErr(error);
     toast('ลบส่วนขยายแล้ว', 'info');
-    closeModal('ext-edit-modal');
+    closeM('ext-edit-modal');
     await refreshAll();
   }
 
@@ -1035,7 +1167,7 @@
       card.appendChild(el('strong', '', r.nickname || r.username || 'ผู้ใช้'));
       card.appendChild(el('div', 'hint', `${r.ext_name} · ฿${r.price} · ${fmtDate(r.created_at)}`));
       const acts = el('div', 'req-actions');
-      acts.appendChild(chip2('คุยกับผู้ซื้อ (ดูสลิป)', () => { closeModal('ext-modal'); closeModal('settings-modal'); openChatById(r.user_id); }));
+      acts.appendChild(chip2('คุยกับผู้ซื้อ (ดูสลิป)', () => { closeM('ext-modal'); closeModal('settings-modal'); openChatById(r.user_id); }));
       const ok = chip2('✅ อนุมัติ (ตรวจสลิปแล้ว)', () => decide(r, true));
       ok.className = 'chip primary';
       acts.appendChild(ok);
@@ -1083,7 +1215,7 @@
         if (isAdmin()) {
           if (p.eventType === 'INSERT') toast('🧩 มีคำขอซื้อส่วนขยายใหม่', 'alert');
           await loadAdminRequests();
-        }
+        } else loadMyReqs();
         later();
       })
       .subscribe();
@@ -1111,6 +1243,7 @@
     try { EXT.adminId = localStorage.getItem('darkchat_ext_admin') || null; } catch (x) { /* ไม่เป็นไร */ }
     subscribe();
     await loadRoom();
+    loadMyReqs();
   }
 
   // ปุ่มเพิ่มเติมในหน้าจอเดิม
@@ -1133,6 +1266,8 @@
   }
 
   wrap('enterApp', onEnter);
+  wrap('renderSlipBar', extSlipRows);
+  wrap('buyPackage', () => { attachQrToLastBo(); });
   wrap('selectChat', () => { loadRoom(); });
   wrap('backToList', () => { EXT.roomKey = null; EXT.roomExt = []; renderHeaderIcons(); });
 
