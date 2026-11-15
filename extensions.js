@@ -977,9 +977,47 @@
     const box = $('messages-container');
     if (!box || box.dataset.extWatch) return;
     box.dataset.extWatch = '1';
+    hookStickBottom(box);
     let t = null;
-    new MutationObserver(() => { clearTimeout(t); t = setTimeout(() => upgradeExtMessages(box), 0); }).observe(box, { childList: true, subtree: true });
+    new MutationObserver(() => { clearTimeout(t); t = setTimeout(() => upgradeKeepBottom(box), 0); }).observe(box, { childList: true, subtree: true });
+    upgradeKeepBottom(box);
+  }
+
+  // การ์ดส่วนขยายสูงกว่าข้อความธรรมดา และไอคอนส่วนขยายบนหัวห้องทำให้พื้นที่แชทเตี้ยลง
+  // หลังแอปเลื่อนลงล่างสุด (เปิดห้อง / ข้อความใหม่) ให้ "ติดล่างสุด" ต่ออีกสักพักจนหน้าจอนิ่ง
+  let stickUntil = 0;
+  function hookStickBottom(box) {
+    const base = window.loadMessages;
+    if (typeof base === 'function' && !base.__stick) {
+      const fn = function () {
+        const r = base.apply(this, arguments);
+        if (box.scrollHeight - box.scrollTop - box.clientHeight < 8) stickUntil = Date.now() + 1500;
+        return r;
+      };
+      fn.__stick = true;
+      window.loadMessages = fn;
+    }
+    // ผู้ใช้แตะ/เลื่อนเอง: เลิกติดล่างสุด
+    ['touchstart', 'wheel', 'pointerdown'].forEach(ev => box.addEventListener(ev, () => { stickUntil = 0; }, { passive: true }));
+    if (typeof ResizeObserver === 'function') {
+      new ResizeObserver(() => { if (Date.now() < stickUntil) box.scrollTop = box.scrollHeight; }).observe(box);
+    }
+  }
+
+  function upgradeKeepBottom(box) {
+    const nearBottom = Date.now() < stickUntil || box.scrollHeight - box.scrollTop - box.clientHeight < 80;
+    const before = box.scrollHeight;
     upgradeExtMessages(box);
+    if (!nearBottom) return;
+    const toBottom = () => { box.scrollTop = box.scrollHeight; };
+    toBottom();
+    requestAnimationFrame(toBottom);
+    // รูปในการ์ด (เช่น สลิป) โหลดเสร็จทีหลัง ดันความสูงเพิ่มอีก
+    box.querySelectorAll('.ext-msg img, .ext-buy img').forEach(img => {
+      if (!img.complete) img.addEventListener('load', () => {
+        if (box.scrollHeight - box.scrollTop - box.clientHeight < 400) toBottom();
+      }, { once: true });
+    });
   }
 
   // ---------- แอดมิน: เพิ่ม/แก้ไขส่วนขยาย ----------
