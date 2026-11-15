@@ -27,6 +27,7 @@ let searchTimer = null;
 let searchToken = 0;
 let entering = false;
 let lastRead = {}; // เวลาข้อความล่าสุดที่อ่านแล้ว แยกตามแชท
+let openUnread = null; // ห้องที่เพิ่งเปิด: อ่านถึงไหน มีกี่ข้อความที่ยังไม่ได้อ่าน (ใช้เลื่อนไปจุดนั้น)
 let pendingChatId = new URLSearchParams(location.search).get('chat'); // เปิดจากการแจ้งเตือน
 let lastBadgeTotal = -1;
 
@@ -961,8 +962,50 @@ function markRead(chatId) {
   loadChatList();
 }
 
+// ---------- อ่านแล้วจากเครื่องอื่น (บัญชีเดียวกันหลายเครื่อง) ----------
+// แชทส่วนตัว: เซิร์ฟเวอร์ใส่ read_at ให้ข้อความที่ส่งถึงเรา / กลุ่ม: last_read_at ของเราใน group_members
+// เครื่องไหนอ่านแล้ว เครื่องอื่นจะรู้จากตรงนี้ แล้วล้างเลขค้างและการแจ้งเตือนของห้องนั้น
+let readSyncTimer = null;
+function scheduleReadSync() {
+  clearTimeout(readSyncTimer);
+  readSyncTimer = setTimeout(syncReadFromServer, 250);
+}
+function syncReadFromServer() {
+  if (!currentUser) return;
+  const me = currentUser.id;
+  const changed = [];
+  for (const chatId in state.messages) {
+    if (chatId === me) continue;
+    let upto = 0;
+    const g = state.groups && state.groups[chatId];
+    if (g) {
+      const mine = (g.members || []).find(m => m.user_id === me);
+      upto = (mine && mine.readAt) || 0;
+    } else {
+      (state.messages[chatId] || []).forEach(m => { if (!m.isMe && m.readAt && m.ts > upto) upto = m.ts; });
+    }
+    if (upto && upto > (lastRead[chatId] || 0)) {
+      const before = unreadOf(chatId);
+      lastRead[chatId] = upto;
+      if (before > 0 && unreadOf(chatId) < before) changed.push(chatId);
+    }
+  }
+  if (!changed.length) return;
+  saveLastRead();
+  loadChatList();
+  changed.forEach(clearChatNotifications);
+}
+function clearChatNotifications(chatId) {
+  if (unreadOf(chatId) > 0) return;
+  try {
+    const sw = navigator.serviceWorker && navigator.serviceWorker.controller;
+    if (sw) sw.postMessage({ type: 'clear-chat', chatId });
+  } catch (e) { /* ไม่เป็นไร */ }
+}
+
 // อัปเดตเลขที่แท็บเบราว์เซอร์, ป้ายบนไอคอนแอป (ถ้าอุปกรณ์รองรับ) และป้ายบนปุ่มย้อนกลับ
 function updateBadges() {
+  scheduleReadSync();
   let total = 0, others = 0;
   if (currentUser) {
     [...Object.keys(state.contacts), ...Object.keys(state.groups || {})].forEach(id => {
@@ -1349,6 +1392,8 @@ function selectChat(chat) {
   if (activeChat && activeChat.id !== target.id) unlockedRooms.delete(activeChat.id);
   saveDraftNow();
   activeChat = target;
+  // จำจุดที่ยังไม่ได้อ่านไว้ก่อน markRead เพื่อเลื่อนไปตรงนั้นตอนเปิดห้อง
+  openUnread = { chatId: target.id, since: lastRead[target.id] || 0, count: unreadOf(target.id), scrolled: false };
   markRead(activeChat.id);
   hideTyping();
 
@@ -1518,6 +1563,8 @@ function loadMessages(keepScroll) {
   const GAP = 30 * 60 * 1000;
   const sameDay = (a, b) => new Date(a).toDateString() === new Date(b).toDateString();
   let prev = null;
+  let unreadMark = null;
+  const ou = openUnread && openUnread.chatId === activeChat.id && openUnread.count > 0 ? openUnread : null;
   const lastOwn = [...list].reverse().find(m => m.isMe && m.status === 'sent');
   const lastOwnId = lastOwn ? lastOwn.id : null;
 
@@ -1527,6 +1574,12 @@ function loadMessages(keepScroll) {
       divider.className = 'date-divider';
       divider.textContent = dividerLabel(msg.ts);
       container.appendChild(divider);
+    }
+    if (ou && !unreadMark && !msg.isMe && msg.kind !== 'system' && msg.ts > ou.since) {
+      unreadMark = document.createElement('div');
+      unreadMark.className = 'unread-divider';
+      unreadMark.textContent = `ข้อความที่ยังไม่ได้อ่าน (${ou.count > 99 ? '99+' : ou.count})`;
+      container.appendChild(unreadMark);
     }
     prev = msg;
 
@@ -1693,7 +1746,23 @@ function loadMessages(keepScroll) {
   });
 
   if (sel.on) decorateSelect(container);
-  container.scrollTop = keepScroll ? prevTop : container.scrollHeight;
+  if (unreadMark && !ou.scrolled && !keepScroll) {
+    // เปิดห้องครั้งแรก: เลื่อนไปข้อความแรกที่ยังไม่ได้อ่าน (เว้นที่ด้านบนให้เห็นข้อความก่อนหน้านิดหน่อย)
+    ou.scrolled = true;
+    ou.scrolledAt = Date.now();
+    const go = () => {
+      if (!unreadMark.isConnected) return;
+      const off = unreadMark.getBoundingClientRect().top - container.getBoundingClientRect().top;
+      container.scrollTop = Math.max(0, container.scrollTop + off - 60);
+    };
+    go();
+    requestAnimationFrame(go);
+    setTimeout(go, 350);   // รอรูปที่โหลดช้าดันความสูง
+    return;
+  }
+  // เพิ่งเลื่อนไปจุดที่ยังไม่ได้อ่าน (ไม่เกิน 2 วิ): วาดใหม่แล้วอย่าดีดลงล่างสุด
+  const holdUnread = ou && ou.scrolled && unreadMark && Date.now() - ou.scrolledAt < 2000;
+  container.scrollTop = keepScroll || holdUnread ? prevTop : container.scrollHeight;
 }
 
 // กดค้างที่ข้อความ = เมนู, ปัดเข้าหาตรงกลาง = ตอบกลับ
@@ -2023,6 +2092,7 @@ function onMessageUpdate(row) {
     if (m.enc) { if (row.media && row.media.expired && m.media) m.media.expired = true; }
     else m.media = row.media || null;
   }
+  if (row.read_at && row.receiver_id === me) scheduleReadSync();   // อ่านจากเครื่องอื่น
   state.pins = state.pins || {};
   const pins = (state.pins[chatKey] || []).filter(p => p.id !== row.id);
   if (row.pinned_at) pins.push(toLocal(row));
@@ -10980,6 +11050,7 @@ async function onGroupChange(payload) {
       const isMe = payload.new.user_id === currentUser.id;
       if (payload.new.role === mem.role && (!isMe || payload.new.muted === g.muted)) {
         mem.readAt = payload.new.last_read_at ? new Date(payload.new.last_read_at).getTime() : null;
+        if (isMe) scheduleReadSync();   // อ่านจากเครื่องอื่น
         if (activeChat && activeChat.id === g.id) loadMessages(true);
         return;
       }
