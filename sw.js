@@ -1,4 +1,4 @@
-const CACHE_NAME = 'darkchat-cache-v3';
+const CACHE_NAME = 'darkchat-cache-v4';
 const META_CACHE = 'darkchat-meta'; // เก็บเลขข้อความที่ยังไม่ได้อ่าน (ใช้กับป้ายบนไอคอน)
 const ASSETS = [
   './',
@@ -77,6 +77,24 @@ self.addEventListener('push', (event) => {
       data: { chatId: data.chatId || null }
     });
     await bumpBadge();
+  })());
+});
+
+// แอปบอกว่าห้องนี้อ่านแล้ว (อาจอ่านจากเครื่องอื่น): ปิดการแจ้งเตือนของห้องนั้นที่ค้างอยู่
+self.addEventListener('message', (event) => {
+  const d = event.data || {};
+  if (d.type !== 'clear-chat' || !d.chatId) return;
+  event.waitUntil((async () => {
+    try {
+      const list = await self.registration.getNotifications();
+      let closed = 0;
+      list.forEach((n) => { if (n.data && n.data.chatId === d.chatId) { n.close(); closed++; } });
+      if (closed) {
+        const left = (await self.registration.getNotifications()).length;
+        const cache = await caches.open(META_CACHE);
+        await cache.put('badge', new Response(String(left)));
+      }
+    } catch (e) { /* อุปกรณ์ไม่รองรับ */ }
   })());
 });
 
