@@ -181,6 +181,11 @@
     const e = byId(id);
     if (!e) return toast('ไม่พบส่วนขยายนี้', 'error');
     if (!e.can_use) return openPaywall(id);
+    if (!e.link) {   // ลิงก์ส่งมาเฉพาะตอนมีสิทธิ์ ถ้าเพิ่งได้สิทธิ์ให้โหลดรายการใหม่ก่อน
+      toast('กำลังโหลดส่วนขยาย ลองกดอีกครั้ง', 'info');
+      refreshAll();
+      return;
+    }
     let url;
     try { url = new URL(e.link); } catch (x) { return toast('ลิงก์ส่วนขยายไม่ถูกต้อง', 'error'); }
     if (url.protocol !== 'https:') return toast('ลิงก์ส่วนขยายไม่ถูกต้อง', 'error');
@@ -1255,7 +1260,6 @@
         const k = (p.new && p.new.room_key) || (p.old && p.old.room_key);
         if (!k || k === EXT.roomKey) loadRoom();
       })
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'extensions' }, later)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'ext_licenses' }, p => {
         later();
         const n = p.new || {};
