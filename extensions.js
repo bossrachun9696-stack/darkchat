@@ -39,7 +39,19 @@
     room_not_supported: 'เชื่อมสมุดบ้านได้เฉพาะแชทกลุ่มและแชทสองคน',
     not_in_family: 'คุณไม่ได้เป็นสมาชิกบ้านนี้ในสมุดบ้าน',
     ledger_ext_missing: 'ยังไม่มีส่วนขยายชนิดสมุดบ้าน ให้แอดมินตั้งชนิดในหน้าแก้ไขส่วนขยาย',
-    post_failed: 'ส่งข้อความเข้าห้องไม่ได้'
+    post_failed: 'ส่งข้อความเข้าห้องไม่ได้',
+    no_family_price: 'ส่วนขยายนี้ไม่มีราคาแบบครอบครัว',
+    no_family: 'คุณยังไม่ได้อยู่ในครอบครัว (ตั้งค่า > ครอบครัว)',
+    already_in_family: 'คุณอยู่ในครอบครัวอยู่แล้ว ออกจากครอบครัวเดิมก่อน',
+    user_in_family: 'คนนี้อยู่ในครอบครัวอื่นแล้ว',
+    already_invited: 'ชวนคนนี้ไปแล้ว รอเขาตอบอยู่',
+    family_full: 'ครอบครัวมีครบ 5 คนแล้ว (นับคำเชิญที่รอตอบด้วย)',
+    not_family_owner: 'เฉพาะหัวหน้าครอบครัวเท่านั้น',
+    invite_gone: 'คำเชิญนี้ถูกยกเลิกหรือตอบไปแล้ว',
+    family_gone: 'ครอบครัวนี้ถูกลบไปแล้ว',
+    not_member: 'คนนี้ไม่ได้อยู่ในครอบครัวแล้ว',
+    bad_price: 'ราคาต้องเป็นตัวเลข 1–100000 บาท',
+    bad_name: 'ใส่ชื่อครอบครัวก่อน'
   };
 
   function extErr(error) {
@@ -203,6 +215,7 @@
     body.appendChild(el('div', 'ext-pay-badge', expired ? '⏰ หมดเวลาทดลองใช้แล้ว' : '🔒 ส่วนขยายแบบเสียเงิน'));
     if (e.description) body.appendChild(el('p', 'ext-desc', e.description));
     body.appendChild(el('div', 'ext-price', '฿' + Number(e.price || 0).toLocaleString('th-TH') + ' · ซื้อครั้งเดียวใช้ได้ตลอด'));
+    if (e.family_price) body.appendChild(el('div', 'hint', `แบบครอบครัว ฿${Number(e.family_price).toLocaleString('th-TH')} ทุกคนในครอบครัวใช้ได้ (สูงสุด ${FAM_MAX} คน)`));
     const st = el('div', 'stack');
     if (!e.trial_used && e.trial_days > 0) {
       st.appendChild(actionBtn(`🎁 ทดลองใช้ฟรี ${e.trial_days} วัน`, () => startTrial(e.id, true), 'primary-btn'));
@@ -212,6 +225,7 @@
       st.appendChild(actionBtn('🧾 ส่งสลิป', () => startExtSlip(e.pending_request), 'secondary-btn'));
     } else {
       st.appendChild(actionBtn(`🛒 ซื้อ ฿${e.price}`, () => buy(e.id), e.trial_used ? 'primary-btn' : 'secondary-btn'));
+      if (e.family_price) st.appendChild(actionBtn(`👨‍👩‍👧 ซื้อแบบครอบครัว ฿${e.family_price} (ทุกคนในครอบครัวใช้ได้)`, () => buy(e.id, 'family'), 'secondary-btn fam-btn'));
     }
     st.appendChild(actionBtn('ปิด', () => closeM('ext-pay-modal')));
     body.appendChild(st);
@@ -238,12 +252,22 @@
   }
 
   // ---------- ซื้อ (ส่งคำขอผ่านน้องโบ๊ะบ๊ะ แล้วโอนนอกแอป) ----------
-  async function buy(id) {
+  async function buy(id, scope) {
     const e = byId(id);
     if (!e) return;
-    const ok = await confirmDialog('ขอซื้อส่วนขยาย', `🧩 ${e.name}\nราคา ฿${e.price} (ซื้อครั้งเดียวใช้ได้ตลอด)\n\nน้องโบ๊ะบ๊ะจะส่งคำขอให้แอดมินและบอกวิธีโอนเงิน`, 'ขอซื้อ');
+    const fam = scope === 'family';
+    if (fam && !myFam()) {
+      const go = await confirmDialog('ต้องมีครอบครัวก่อน', `ซื้อแบบครอบครัวได้เมื่ออยู่ในครอบครัวแล้ว (สูงสุด ${FAM_MAX} คน)\nสร้างครอบครัวหรือเข้าร่วมครอบครัวก่อน`, 'ไปที่ครอบครัว');
+      if (go) { closeM('ext-pay-modal'); closeM('ext-modal'); openFamily(); }
+      return;
+    }
+    const price = fam ? e.family_price : e.price;
+    const ok = await confirmDialog(fam ? 'ขอซื้อส่วนขยายแบบครอบครัว' : 'ขอซื้อส่วนขยาย',
+      `🧩 ${e.name}${fam ? ` · 👨‍👩‍👧 ครอบครัว "${myFam().name}"` : ''}\nราคา ฿${price} (ซื้อครั้งเดียวใช้ได้ตลอด${fam ? ' ทุกคนในครอบครัวใช้ได้' : ''})` +
+      (e.pending_request ? '\n(มีคำขอซื้อตัวนี้ค้างอยู่ จะเปลี่ยนเป็นแบบที่เลือกนี้)' : '') +
+      `\n\nน้องโบ๊ะบ๊ะจะส่งคำขอให้แอดมินและบอกวิธีโอนเงิน`, 'ขอซื้อ');
     if (!ok) return;
-    const { data, error } = await sb.rpc('ext_request_purchase', { p_ext: id });
+    const { data, error } = await sb.rpc('ext_request_purchase', fam ? { p_ext: id, p_scope: 'family' } : { p_ext: id });
     if (error) return extErr(error);
     closeM('ext-pay-modal');
     await refreshAll();
@@ -251,8 +275,8 @@
     await loadAdminId();
     await loadMyReqs();
     closeM('ext-room-modal');
-    boSay(`ขอซื้อส่วนขยาย ${e.name} ฿${e.price}`,
-      `ส่งคำขอซื้อส่วนขยาย ${e.name} (ซื้อครั้งเดียวใช้ได้ตลอด ฿${data.price}) ให้แอดมินแล้วครับ ✅\n\n` +
+    boSay(`ขอซื้อส่วนขยาย ${e.name}${fam ? ' แบบครอบครัว' : ''} ฿${price}`,
+      `ส่งคำขอซื้อส่วนขยาย ${e.name}${fam ? ` แบบครอบครัว "${data.family_name || myFam().name}" (ทุกคนในครอบครัวใช้ได้` : ' (ซื้อครั้งเดียวใช้ได้ตลอด'} ฿${data.price}) ให้แอดมินแล้วครับ ✅\n\n` +
       (data.pay_info ? `วิธีชำระเงิน:\n${data.pay_info}\n\n` : 'แอดมินจะแจ้งวิธีชำระเงินให้ทางข้อความครับ\n\n') +
       'โอนเสร็จแล้ว กดปุ่ม "🧾 ส่งสลิป" ด้านล่าง แล้วเลือกรูปสลิป น้องจะส่งต่อให้แอดมิน แอดมินตรวจแล้วจะเปิดใช้งานให้และแจ้งทางแชทครับ');
   }
@@ -353,7 +377,7 @@
     bar.querySelectorAll('.ext-slip-row').forEach(n => n.remove());
     (EXT.myReqs || []).forEach(r => {
       const row = el('div', 'slip-row ext-slip-row');
-      row.appendChild(el('span', '', `🧩 ${r.ext_name} · ส่วนขยาย ฿${r.price} · ${r.status === 'slip_sent' ? 'ส่งสลิปแล้ว รอแอดมินเปิดให้' : 'รอโอนเงินและส่งสลิป'}`));
+      row.appendChild(el('span', '', `🧩 ${r.ext_name} · ส่วนขยาย${r.scope === 'family' ? ' 👨‍👩‍👧 ครอบครัว' : ''} ฿${r.price} · ${r.status === 'slip_sent' ? 'ส่งสลิปแล้ว รอแอดมินเปิดให้' : 'รอโอนเงินและส่งสลิป'}`));
       const b1 = chip2(r.status === 'slip_sent' ? '🧾 ส่งสลิปเพิ่ม' : '🧾 ส่งสลิป', () => { EXT.slipFor = r.id; slipInput().click(); });
       b1.className = 'chip primary';
       const b2 = chip2('ยกเลิกคำขอ', () => cancelRequest({ name: r.ext_name, pending_request: r.id }));
@@ -384,7 +408,7 @@
       await loadAdminRequests();
     }
     await loadAdminId();
-    try { if (hasPackages()) await Promise.all([loadEntitlements(), loadMyPurchase()]); } catch (x) { /* ไม่เป็นไร */ }
+    try { if (hasPackages()) await Promise.all([loadEntitlements(), loadMyPurchase(), loadPrices(), loadFam()]); } catch (x) { /* ไม่เป็นไร */ }
     renderStore();
     if (focusAi) setTimeout(() => { const i = $('ext-ai-input'); if (i) i.focus(); }, 50);
   }
@@ -481,9 +505,15 @@
     rows.forEach(e => list.appendChild(extCard(e)));
     body.appendChild(list);
 
-    if (isAdmin()) { body.appendChild(adminBlock()); body.appendChild(adminPayBlock()); }
+    if (isAdmin()) { body.appendChild(adminBlock()); body.appendChild(adminPriceBlock()); body.appendChild(adminPayBlock()); }
+    else if (EXT.famReady) {
+      const fb = el('div', 'fam-store-bar');
+      fb.appendChild(el('span', '', myFam() ? `👨‍👩‍👧 ครอบครัว "${myFam().name}" · ${(EXT.fam.members || []).length}/${FAM_MAX} คน` : '👨‍👩‍👧 ซื้อแบบครอบครัวได้ เมื่อสร้างหรือเข้าร่วมครอบครัว'));
+      fb.appendChild(chip2(myFam() ? 'จัดการครอบครัว' : 'สร้าง / เข้าร่วม', () => { closeM('ext-modal'); openFamily(); }));
+      body.insertBefore(fb, body.querySelector('.ext-tabs'));
+    }
 
-    const note = el('div', 'hint ext-note', 'ซื้อแพ็กเกจและส่วนขยายผ่านน้องโบ๊ะบ๊ะ: กดซื้อ แล้วโอนตามวิธีชำระเงิน กด "🧾 ส่งสลิป" ในแชทน้อง แอดมินตรวจแล้วเปิดให้ · ส่วนขยายเสียเงินทุกตัวทดลองใช้ฟรีได้ 1 ครั้ง ซื้อแล้วใช้ได้ตลอด · เพิ่มส่วนขยายเข้าห้องได้จากปุ่ม ⋮ ในห้อง');
+    const note = el('div', 'hint ext-note', 'ซื้อแพ็กเกจและส่วนขยายผ่านน้องโบ๊ะบ๊ะ: กดซื้อ แล้วโอนตามวิธีชำระเงิน กด "🧾 ส่งสลิป" ในแชทน้อง แอดมินตรวจแล้วเปิดให้ · ส่วนขยายเสียเงินทุกตัวทดลองใช้ฟรีได้ 1 ครั้ง ซื้อแล้วใช้ได้ตลอด · แบบครอบครัว ทุกคนในครอบครัวใช้ได้ (ออกจากครอบครัวแล้วใช้ไม่ได้) · เพิ่มส่วนขยายเข้าห้องได้จากปุ่ม ⋮ ในห้อง');
     body.appendChild(note);
   }
 
@@ -506,7 +536,8 @@
       info.appendChild(el('strong', '', 'แพ็กเกจ ' + pr.name));
       const active = ent && ent.active;
       info.appendChild(el('span', 'ext-badge ' + (active ? 'own' : open ? 'wait' : 'paid'),
-        typeof entLabel === 'function' && state.ent ? (active ? entLabel(p) : open ? (open.status === 'slip_sent' ? 'ส่งสลิปแล้ว รอเปิดให้' : 'รอโอนเงิน') : `฿${PRICES.monthly}/เดือน · ฿${PRICES.lifetime} ตลอดชีพ`) : 'แพ็กเกจ'));
+        typeof entLabel === 'function' && state.ent ? (active ? entLabel(p) : open ? (open.status === 'slip_sent' ? 'ส่งสลิปแล้ว รอเปิดให้' : 'รอโอนเงิน') + (open.scope === 'family' ? ' · ครอบครัว' : '') : `฿${PRICES.monthly}/เดือน · ฿${PRICES.lifetime} ตลอดชีพ`) : 'แพ็กเกจ'));
+      if (!active && !open) info.appendChild(el('span', 'hint', `👨‍👩‍👧 ครอบครัว ฿${EXT.prices.family.monthly}/เดือน · ฿${EXT.prices.family.lifetime} ตลอดชีพ`));
       head.appendChild(info);
       card.appendChild(head);
       card.appendChild(el('div', 'ext-desc', pr.desc));
@@ -524,6 +555,7 @@
           if (plan === 'lifetime' && !open) b.className = 'chip primary';
           acts.appendChild(b);
         });
+        if (EXT.famReady) famPkgButtons(p, true).forEach(b => acts.appendChild(b));
       }
       card.appendChild(acts);
       return card;
@@ -535,8 +567,9 @@
     if (e.is_free) return { t: 'ฟรี', c: 'free' };
     if (isAdmin()) return { t: 'แอดมิน · ฿' + e.price, c: 'own' };
     if (e.license_kind === 'paid' || e.license_kind === 'granted') return { t: 'ซื้อแล้ว', c: 'own' };
+    if (e.family_owned) return { t: '👨‍👩‍👧 ครอบครัว', c: 'own' };
     if (e.license_kind === 'trial' && e.can_use) return { t: `ทดลองเหลือ ${daysLeft(e.expires_at)} วัน`, c: 'trial' };
-    if (e.pending_request) return { t: e.pending_status === 'slip_sent' ? 'ส่งสลิปแล้ว รอเปิดให้' : 'รอโอนเงิน', c: 'wait' };
+    if (e.pending_request) return { t: (e.pending_status === 'slip_sent' ? 'ส่งสลิปแล้ว รอเปิดให้' : 'รอโอนเงิน') + (e.pending_scope === 'family' ? ' · ครอบครัว' : ''), c: 'wait' };
     if (e.license_kind === 'trial') return { t: 'หมดเวลาทดลอง · ฿' + e.price, c: 'paid' };
     return { t: '฿' + e.price, c: 'paid' };
   }
@@ -552,6 +585,7 @@
     head.appendChild(info);
     card.appendChild(head);
     if (e.description) card.appendChild(el('div', 'ext-desc', e.description));
+    if (!e.is_free && e.family_price && !e.family_owned) card.appendChild(el('div', 'hint', `👨‍👩‍👧 แบบครอบครัว ฿${e.family_price} ทุกคนในครอบครัวใช้ได้`));
 
     const acts = el('div', 'ext-acts');
     if (e.can_use) {
@@ -565,7 +599,7 @@
         acts.appendChild(t);
       }
     }
-    if (!e.is_free && !isAdmin() && !(e.license_kind === 'paid' || e.license_kind === 'granted')) {
+    if (!e.is_free && !isAdmin() && !e.family_owned && !(e.license_kind === 'paid' || e.license_kind === 'granted')) {
       if (e.pending_request) {
         acts.appendChild(chip2(e.pending_status === 'slip_sent' ? '🧾 ส่งสลิปเพิ่ม' : '🧾 ส่งสลิป', () => startExtSlip(e.pending_request)));
         const c = chip2('ยกเลิกคำขอ', () => cancelRequest(e));
@@ -573,7 +607,13 @@
         acts.appendChild(c);
       } else {
         acts.appendChild(chip2(`🛒 ซื้อ ฿${e.price}`, () => buy(e.id)));
+        if (e.family_price) { const f = chip2(`👨‍👩‍👧 ครอบครัว ฿${e.family_price}`, () => buy(e.id, 'family')); f.classList.add('fam-chip'); acts.appendChild(f); }
       }
+    } else if (!e.is_free && !isAdmin() && !e.family_owned && e.family_price && myFam() && !e.pending_request) {
+      // ซื้อคนเดียวไว้แล้ว อยากให้ทั้งครอบครัวใช้ด้วย
+      const f = chip2(`👨‍👩‍👧 ให้ครอบครัวใช้ด้วย ฿${e.family_price}`, () => buy(e.id, 'family'));
+      f.classList.add('fam-chip');
+      acts.appendChild(f);
     }
     if (activeChat && e.can_use && EXT.roomKey && !EXT.roomExt.includes(e.id)) {
       acts.appendChild(chip2('➕ เพิ่มเข้าห้องนี้', () => addToRoom(e.id)));
@@ -814,15 +854,16 @@
     head.appendChild(el('strong', '', meta.slip ? '🧾 สลิปการโอน' : '🧩 คำขอซื้อส่วนขยาย'));
     head.appendChild(el('span', 'ext-buy-status', meta.status_text || STATUS_TXT[st] || ''));
     card.appendChild(head);
-    card.appendChild(el('div', 'ext-buy-info', `${meta.buyer || 'ผู้ใช้'} · ส่วนขยาย ${meta.ext_name || ''} · ซื้อครั้งเดียวใช้ได้ตลอด · ฿${meta.price ?? ''}`));
+    card.appendChild(el('div', 'ext-buy-info', `${meta.buyer || 'ผู้ใช้'} · ส่วนขยาย ${meta.ext_name || ''} · ${meta.scope === 'family' ? `👨‍👩‍👧 ครอบครัว${meta.family_name ? ` "${meta.family_name}"` : ''} (ทุกคนในครอบครัวใช้ได้)` : 'ซื้อครั้งเดียวใช้ได้ตลอด'} · ฿${meta.price ?? ''}`));
     if (meta.slip && m.media && m.media.path && typeof buildMediaEl === 'function') {
       try { card.appendChild(buildMediaEl(m)); } catch (x) { console.error('slip media', x); }
     }
     if (open && isAdmin() && !m.isMe) {
       const acts = el('div', 'ext-msg-acts');
-      const ok = chip2('✅ อนุมัติ เปิดใช้งาน (ตรวจสลิปแล้ว)', () => decide({ id: meta.request_id, ext_name: meta.ext_name, nickname: meta.buyer }, true));
+      const R = { id: meta.request_id, ext_name: meta.ext_name, nickname: meta.buyer, scope: meta.scope, family_name: meta.family_name };
+      const ok = chip2('✅ อนุมัติ เปิดใช้งาน (ตรวจสลิปแล้ว)', () => decide(R, true));
       ok.className = 'chip primary';
-      const no = chip2('ไม่อนุมัติ', () => decide({ id: meta.request_id, ext_name: meta.ext_name, nickname: meta.buyer }, false));
+      const no = chip2('ไม่อนุมัติ', () => decide(R, false));
       no.classList.add('danger');
       acts.append(ok, no);
       card.appendChild(acts);
@@ -896,9 +937,12 @@
       try { m = findMessage(row.dataset.id); } catch (x) { m = null; }
       if (!m || m.kind !== 'ext') return;
       const meta = m.rmeta || {};
-      if (meta.ext === 'purchase' || meta.ext === 'purchase_result') {
+      if (meta.ext === 'purchase' || meta.ext === 'purchase_result' || meta.ext === 'fam_invite' || meta.ext === 'fam_info') {
         let c;
-        try { c = meta.ext === 'purchase' ? buildPurchaseCard(m) : buildResultCard(m); } catch (x) { console.error('ext card', x); return; }
+        try {
+          c = meta.ext === 'purchase' ? buildPurchaseCard(m) : meta.ext === 'fam_invite' ? buildFamInviteCard(m)
+            : meta.ext === 'fam_info' ? buildFamInfoCard(m) : buildResultCard(m);
+        } catch (x) { console.error('ext card', x); return; }
         c.dataset.id = m.id;
         row.replaceWith(c);
         return;
@@ -987,7 +1031,9 @@
     const trial = mk('input', { id: 'ext-f-trial', type: 'number', min: 0, max: 365, inputMode: 'numeric', value: e ? e.trial_days : 30 });
     const g1 = el('div', 'input-group'); g1.append(el('label', '', 'ราคา (บาท) ซื้อครั้งเดียวใช้ได้ตลอด'), price);
     const g2 = el('div', 'input-group'); g2.append(el('label', '', 'ทดลองใช้ฟรี (วัน)'), trial);
-    paidBox.append(g1, g2);
+    const fprice = mk('input', { id: 'ext-f-fprice', type: 'number', min: 1, max: 100000, inputMode: 'numeric', value: e && e.family_price ? e.family_price : '', placeholder: 'เว้นว่าง = ไม่มีแบบครอบครัว' });
+    const g3 = el('div', 'input-group'); g3.append(el('label', '', `ราคาครอบครัว (บาท) ทุกคนในครอบครัวใช้ได้ สูงสุด ${FAM_MAX} คน`), fprice);
+    paidBox.append(g1, g3, g2);
     body.appendChild(paidBox);
     let free = e ? e.is_free : false;
     const setFree = v => { free = v; bFree.classList.toggle('active', v); bPaid.classList.toggle('active', !v); paidBox.classList.toggle('hidden-element', v); };
@@ -1085,6 +1131,11 @@
       const { error: kErr } = await sb.rpc('ext_admin_set_kind', { p_id: newId || editId, p_kind: kind });
       if (kErr && kind === 'ledger') toast('บันทึกแล้ว แต่ตั้งชนิดสมุดบ้านไม่ได้: รัน supabase-ledger.sql ก่อน', 'error');
     }
+    if (!error) {
+      const fp = parseInt(($('ext-f-fprice') || {}).value, 10);
+      const { error: fErr } = await sb.rpc('ext_admin_set_family_price', { p_ext: newId || editId, p_price: !free && fp > 0 ? fp : null });
+      if (fErr && fp > 0) toast('บันทึกแล้ว แต่ตั้งราคาครอบครัวไม่ได้: รัน supabase-v5-family.sql ก่อน', 'error');
+    }
     if (typeof setBusy === 'function') setBusy(save, false);
     if (error) return extErr(error);
     toast(editId ? 'บันทึกการแก้ไขแล้ว' : 'เพิ่มส่วนขยายแล้ว', 'success');
@@ -1165,7 +1216,7 @@
     EXT.adminReqs.forEach(r => {
       const card = el('div', 'req-card');
       card.appendChild(el('strong', '', r.nickname || r.username || 'ผู้ใช้'));
-      card.appendChild(el('div', 'hint', `${r.ext_name} · ฿${r.price} · ${fmtDate(r.created_at)}`));
+      card.appendChild(el('div', 'hint', `${r.ext_name}${r.scope === 'family' ? ` · 👨‍👩‍👧 ครอบครัว${r.family_name ? ` "${r.family_name}"` : ''}` : ''} · ฿${r.price} · ${r.status === 'slip_sent' ? `ส่งสลิปแล้ว ${r.slips || ''} ใบ` : 'ยังไม่ส่งสลิป'} · ${fmtDate(r.created_at)}`));
       const acts = el('div', 'req-actions');
       acts.appendChild(chip2('คุยกับผู้ซื้อ (ดูสลิป)', () => { closeM('ext-modal'); closeModal('settings-modal'); openChatById(r.user_id); }));
       const ok = chip2('✅ อนุมัติ (ตรวจสลิปแล้ว)', () => decide(r, true));
@@ -1182,7 +1233,7 @@
 
   async function decide(r, approve) {
     const ok = await confirmDialog(approve ? 'อนุมัติคำขอซื้อ' : 'ไม่อนุมัติ',
-      approve ? `เปิด ${r.ext_name} ให้ ${r.nickname || r.username} ใช้ได้ตลอด\nตรวจสลิปแล้วใช่ไหม?` : `ปฏิเสธคำขอซื้อ ${r.ext_name} ของ ${r.nickname || r.username}?`,
+      approve ? (r.scope === 'family' ? `เปิด ${r.ext_name} ให้ครอบครัว${r.family_name ? ` "${r.family_name}"` : ''} ของ ${r.nickname || r.username}\nทุกคนในครอบครัวใช้ได้ตลอด\nตรวจสลิปแล้วใช่ไหม?` : `เปิด ${r.ext_name} ให้ ${r.nickname || r.username} ใช้ได้ตลอด\nตรวจสลิปแล้วใช่ไหม?`) : `ปฏิเสธคำขอซื้อ ${r.ext_name} ของ ${r.nickname || r.username}?`,
       approve ? 'อนุมัติ' : 'ไม่อนุมัติ', !approve);
     if (!ok) return;
     const { error } = await sb.rpc('ext_admin_decide', { p_request: r.id, p_approve: approve });
@@ -1197,6 +1248,8 @@
     if (EXT.channel) { try { sb.removeChannel(EXT.channel); } catch (x) { /* ไม่เป็นไร */ } }
     let t = null;
     const later = () => { clearTimeout(t); t = setTimeout(refreshAll, 400); };
+    let ft = null;
+    const famLater = () => { clearTimeout(ft); ft = setTimeout(async () => { await loadFam(); refreshEnt(); }, 500); };
     EXT.channel = sb.channel('ext-' + currentUser.id)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'room_extensions' }, p => {
         const k = (p.new && p.new.room_key) || (p.old && p.old.room_key);
@@ -1211,6 +1264,15 @@
           toast(`🎉 แอดมินเปิดใช้งาน ${e ? e.name : 'ส่วนขยาย'} ให้แล้ว`, 'success');
         }
       })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'dc_family_members' }, famLater)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'dc_family_invites' }, p => {
+        const n = p.new || {};
+        if (p.eventType === 'INSERT' && n.invitee_id === currentUser.id) toast('👨‍👩‍👧 มีคำเชิญเข้าครอบครัว ดูได้ในแชทหรือ ตั้งค่า > ครอบครัว', 'alert');
+        famLater();
+      })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'dc_families' }, famLater)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'family_grants' }, famLater)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'ext_family_licenses' }, famLater)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'ext_purchases' }, async p => {
         if (isAdmin()) {
           if (p.eventType === 'INSERT') toast('🧩 มีคำขอซื้อส่วนขยายใหม่', 'alert');
@@ -1219,6 +1281,560 @@
         later();
       })
       .subscribe();
+  }
+
+  // =====================================================================
+  // ครอบครัว (สูงสุด 5 คน) + ราคาแพ็กเกจ (คนเดียว / ครอบครัว)
+  // ต้องรัน supabase-v5-family.sql
+  // =====================================================================
+  EXT.fam = null;          // ผลจาก fam_my()
+  EXT.famReady = true;     // false = ยังไม่ได้รัน SQL ครอบครัว
+  EXT.prices = { single: { monthly: 29, lifetime: 99 }, family: { monthly: 79, lifetime: 249 } };
+  const FAM_MAX = 5;
+  const myFam = () => EXT.fam && EXT.fam.family;
+  const iAmOwner = () => !!(myFam() && currentUser && myFam().owner_id === currentUser.id);
+  const baht = n => '฿' + Number(n || 0).toLocaleString('th-TH');
+
+  async function loadPrices() {
+    const { data, error } = await sb.rpc('ext_prices');
+    if (!error && data && data.single && data.family) EXT.prices = data;
+    if (typeof PRICES === 'object' && PRICES) {   // ราคาในหน้าแพ็กเกจเดิมของแอป
+      PRICES.monthly = EXT.prices.single.monthly;
+      PRICES.lifetime = EXT.prices.single.lifetime;
+    }
+    const hint = $('pkg-price-hint');
+    if (hint) hint.textContent = priceLine();
+  }
+  function priceLine() {
+    const p = EXT.prices;
+    return `คนเดียว: แพ็กเกจละ ${p.single.monthly} บาท/เดือน หรือ ${p.single.lifetime} บาทตลอดชีพ · ครอบครัว (สูงสุด ${FAM_MAX} คน): ${p.family.monthly} บาท/เดือน หรือ ${p.family.lifetime} บาทตลอดชีพ · ซื้อผ่านน้องโบ๊ะบ๊ะ`;
+  }
+
+  async function loadFam() {
+    const { data, error } = await sb.rpc('fam_my');
+    if (error) {
+      EXT.famReady = !/Could not find the function|does not exist/i.test(error.message || '');
+      EXT.fam = null;
+    } else {
+      EXT.famReady = true;
+      EXT.fam = data || { family: null, invites: [] };
+    }
+    renderFamSetting();
+    if (isOpen('fam-modal')) renderFamily();
+  }
+
+  // ---------- ตั้งค่า > ครอบครัว ----------
+  function renderFamSetting() {
+    const st = $('fam-set-status');
+    if (!st) return;
+    const f = myFam();
+    const inv = (EXT.fam && EXT.fam.invites) || [];
+    if (!EXT.famReady) st.textContent = 'ยังไม่ได้เปิดระบบครอบครัว (แอดมินต้องรัน supabase-v5-family.sql)';
+    else if (f) st.textContent = `${f.name} · สมาชิก ${(EXT.fam.members || []).length}/${FAM_MAX} คน` + (iAmOwner() ? ' · คุณเป็นหัวหน้า' : '');
+    else st.textContent = inv.length ? `มีคำเชิญเข้าครอบครัว ${inv.length} รายการ` : 'ยังไม่มีครอบครัว สร้างหรือรอเพื่อนชวนได้';
+    st.classList.toggle('ent-on', !!f);
+  }
+
+  async function openFamily() {
+    if (typeof toggleGearMenu === 'function') toggleGearMenu(false);
+    ensureModal('fam-modal', 'confirm-box fam-box');
+    renderFamily(true);
+    openModal('fam-modal');
+    await loadFam();
+  }
+
+  function avatarNode(p) {
+    const a = el('div', 'fam-av');
+    const name = (p && (p.nickname || p.username)) || 'ผู้ใช้';
+    try { renderAvatar(a, p && p.avatar, name); } catch (x) { a.textContent = name.charAt(0); }
+    return a;
+  }
+
+  function renderFamily(loading) {
+    const body = $('fam-modal-body');
+    if (!body) return;
+    body.innerHTML = '';
+    const top = el('div', 'ext-top');
+    top.appendChild(el('h3', '', '👨‍👩‍👧 ครอบครัว'));
+    const x = el('button', 'icon-btn', '✕');
+    x.type = 'button';
+    x.setAttribute('aria-label', 'ปิด');
+    x.onclick = () => closeM('fam-modal');
+    top.appendChild(x);
+    body.appendChild(top);
+    if (!EXT.famReady) { body.appendChild(hintNode('ยังไม่ได้เปิดระบบครอบครัว: รันไฟล์ supabase-v5-family.sql ใน SQL Editor ของ Supabase ก่อน')); return; }
+    if (loading && !EXT.fam) { body.appendChild(hintNode('กำลังโหลด…')); return; }
+    const F = EXT.fam || {};
+    const f = F.family;
+
+    // คำเชิญที่ส่งมาหาฉัน
+    (F.invites || []).forEach(i => {
+      const c = el('div', 'fam-invite');
+      c.appendChild(el('div', '', `📩 ${i.inviter || 'ผู้ใช้'} ชวนคุณเข้าครอบครัว "${i.family_name}"`));
+      const a = el('div', 'ext-acts');
+      const ok = chip2('เข้าร่วม', () => respondInvite(i.id, true, i.family_name));
+      ok.className = 'chip primary';
+      const no = chip2('ปฏิเสธ', () => respondInvite(i.id, false, i.family_name));
+      a.append(ok, no);
+      c.appendChild(a);
+      body.appendChild(c);
+    });
+
+    if (!f) {
+      body.appendChild(el('p', 'ext-desc', `ครอบครัวมีสมาชิกได้ไม่เกิน ${FAM_MAX} คน ซื้อแพ็กเกจหรือส่วนขยายแบบครอบครัวครั้งเดียว ทุกคนในครอบครัวใช้ได้ ใครออกจากครอบครัวก็ใช้ไม่ได้ทันที`));
+      const form = document.createElement('form');
+      form.className = 'inline-form';
+      const inp = document.createElement('input');
+      inp.className = 'plain-input';
+      inp.maxLength = 40;
+      inp.placeholder = 'ชื่อครอบครัว เช่น บ้านเรา';
+      const go = el('button', 'mini-btn', 'สร้างครอบครัว');
+      go.type = 'submit';
+      form.append(inp, go);
+      form.onsubmit = async ev => {
+        ev.preventDefault();
+        const { error } = await sb.rpc('fam_create', { p_name: inp.value });
+        if (error) return extErr(error);
+        toast('สร้างครอบครัวแล้ว ชวนสมาชิกได้เลย', 'success');
+        await loadFam();
+        refreshEnt();
+      };
+      body.appendChild(form);
+      body.appendChild(el('div', 'hint', 'หรือรอให้เพื่อนที่มีครอบครัวอยู่แล้วชวนเข้า คำเชิญจะขึ้นในแชทและที่หน้านี้'));
+      return;
+    }
+
+    // หัวครอบครัว
+    const head = el('div', 'fam-head');
+    head.appendChild(el('strong', 'fam-name', f.name));
+    if (iAmOwner()) {
+      const rn = chip2('✏️ เปลี่ยนชื่อ', async () => {
+        const v = window.prompt('ชื่อครอบครัวใหม่', f.name);
+        if (v == null || !v.trim()) return;
+        const { error } = await sb.rpc('fam_rename', { p_name: v.trim() });
+        if (error) return extErr(error);
+        loadFam();
+      });
+      head.appendChild(rn);
+    }
+    body.appendChild(head);
+
+    const mem = F.members || [];
+    const sent = F.sent || [];
+    body.appendChild(el('div', 'list-title', `สมาชิก ${mem.length}/${FAM_MAX} คน` + (sent.length ? ` · รอตอบ ${sent.length}` : '')));
+    const list = el('div', 'fam-list');
+    mem.forEach(m => {
+      const row = el('div', 'fam-row');
+      row.appendChild(avatarNode(m));
+      const nm = el('div', 'fam-row-name');
+      nm.appendChild(el('strong', '', (m.nickname || m.username || 'ผู้ใช้') + (m.user_id === currentUser.id ? ' (คุณ)' : '')));
+      nm.appendChild(el('span', 'hint', m.owner ? '👑 หัวหน้าครอบครัว' : 'สมาชิก'));
+      row.appendChild(nm);
+      if (iAmOwner() && m.user_id !== currentUser.id) {
+        const menu = el('div', 'fam-row-acts');
+        menu.appendChild(chip2('ยกเป็นหัวหน้า', async () => {
+          if (!(await confirmDialog('ยกตำแหน่งหัวหน้า', `ให้ ${m.nickname || m.username} เป็นหัวหน้าครอบครัวแทนคุณ?\nหัวหน้าเป็นคนชวนและนำสมาชิกออกได้`, 'ยืนยัน'))) return;
+          const { error } = await sb.rpc('fam_transfer', { p_user: m.user_id });
+          if (error) return extErr(error);
+          loadFam();
+        }));
+        const rm = chip2('นำออก', async () => {
+          if (!(await confirmDialog('นำออกจากครอบครัว', `นำ ${m.nickname || m.username} ออกจากครอบครัว?\nเขาจะใช้แพ็กเกจและส่วนขยายแบบครอบครัวไม่ได้ทันที`, 'นำออก', true))) return;
+          const { error } = await sb.rpc('fam_remove', { p_user: m.user_id });
+          if (error) return extErr(error);
+          toast('นำออกแล้ว', 'info');
+          loadFam();
+        });
+        rm.classList.add('danger');
+        menu.appendChild(rm);
+        row.appendChild(menu);
+      }
+      list.appendChild(row);
+    });
+    sent.forEach(s => {
+      const row = el('div', 'fam-row fam-pending');
+      row.appendChild(avatarNode({ nickname: s.name }));
+      const nm = el('div', 'fam-row-name');
+      nm.appendChild(el('strong', '', s.name || 'ผู้ใช้'));
+      nm.appendChild(el('span', 'hint', '⏳ รอตอบรับคำเชิญ'));
+      row.appendChild(nm);
+      if (iAmOwner()) {
+        const c = chip2('ยกเลิกคำเชิญ', async () => {
+          const { error } = await sb.rpc('fam_cancel_invite', { p_invite: s.id });
+          if (error) return extErr(error);
+          loadFam();
+        });
+        c.classList.add('danger');
+        row.appendChild(c);
+      }
+      list.appendChild(row);
+    });
+    body.appendChild(list);
+    if (iAmOwner()) {
+      if (mem.length + sent.length < FAM_MAX) body.appendChild(actionBtn('➕ ชวนเพื่อนเข้าครอบครัว', openInvitePicker, 'secondary-btn'));
+      else body.appendChild(el('div', 'hint', `ครบ ${FAM_MAX} คนแล้ว (นับคำเชิญที่รอตอบด้วย)`));
+    } else body.appendChild(el('div', 'hint', 'หัวหน้าครอบครัวเป็นคนชวนสมาชิกใหม่'));
+
+    // สิ่งที่ครอบครัวมี
+    body.appendChild(el('div', 'list-title', '⭐ แพ็กเกจและส่วนขยายของครอบครัว'));
+    const own = el('div', 'fam-own');
+    const pk = (F.pkgs || []).filter(p => p.active);
+    pk.forEach(p => {
+      const pr = (typeof PRODUCTS === 'object' && PRODUCTS[p.product]) || { icon: '⭐', name: p.product };
+      own.appendChild(el('div', 'fam-own-row', `${pr.icon} แพ็กเกจ ${pr.name} · ${p.lifetime ? 'ตลอดชีพ' : 'ใช้ได้ถึง ' + fmtDate(new Date(new Date(p.expires_at).getTime() - 1000).toISOString())}`));
+    });
+    (F.exts || []).forEach(e => own.appendChild(el('div', 'fam-own-row', `🧩 ${e.name} · ใช้ได้ตลอด`)));
+    if (!own.children.length) own.appendChild(el('div', 'hint', 'ยังไม่มี ซื้อแบบครอบครัวได้ในร้าน (สมาชิกคนไหนก็ซื้อได้)'));
+    body.appendChild(own);
+    body.appendChild(actionBtn('🛒 ซื้อแบบครอบครัว (ร้านส่วนขยาย)', () => { closeM('fam-modal'); closeM('settings-modal'); openExtStore(); }, 'primary-btn'));
+
+    const leave = actionBtn('ออกจากครอบครัว', leaveFamily, 'secondary-btn danger');
+    body.appendChild(leave);
+  }
+
+  async function leaveFamily() {
+    const F = EXT.fam || {};
+    const last = (F.members || []).length <= 1;
+    const msg = last
+      ? 'คุณเป็นคนสุดท้ายในครอบครัว ถ้าออก ครอบครัวนี้จะถูกลบ รวมถึงแพ็กเกจและส่วนขยายที่ซื้อแบบครอบครัวด้วย (กู้คืนไม่ได้)'
+      : 'คุณจะใช้แพ็กเกจและส่วนขยายแบบครอบครัวไม่ได้ทันที' + (iAmOwner() ? '\nตำแหน่งหัวหน้าจะส่งต่อให้สมาชิกที่อยู่นานที่สุด' : '');
+    if (!(await confirmDialog('ออกจากครอบครัว', msg, last ? 'ออกและลบครอบครัว' : 'ออกจากครอบครัว', true))) return;
+    const { error } = await sb.rpc('fam_leave');
+    if (error) return extErr(error);
+    toast('ออกจากครอบครัวแล้ว', 'info');
+    await loadFam();
+    refreshEnt();
+  }
+
+  async function respondInvite(id, accept, name) {
+    if (accept && myFam()) return toast('ออกจากครอบครัวเดิมก่อน แล้วค่อยเข้าร่วมครอบครัวใหม่', 'error');
+    const { error } = await sb.rpc('fam_respond', { p_invite: id, p_accept: accept });
+    if (error) return extErr(error);
+    toast(accept ? `เข้าร่วมครอบครัว "${name}" แล้ว` : 'ปฏิเสธคำเชิญแล้ว', accept ? 'success' : 'info');
+    await loadFam();
+    if (accept) refreshEnt();
+  }
+
+  function openInvitePicker() {
+    ensureModal('fam-pick-modal', 'confirm-box fam-box');
+    const body = $('fam-pick-modal-body');
+    body.innerHTML = '';
+    body.appendChild(el('h3', '', 'ชวนเข้าครอบครัว'));
+    const inp = document.createElement('input');
+    inp.className = 'plain-input';
+    inp.placeholder = 'ค้นหาชื่อเพื่อน';
+    body.appendChild(inp);
+    const list = el('div', 'fam-list fam-pick-list');
+    body.appendChild(list);
+    const F = EXT.fam || {};
+    const skip = new Set([...(F.members || []).map(m => m.user_id), ...(F.sent || []).map(s => s.user_id)]);
+    let ids = [];
+    try { ids = friendIds(); } catch (x) { ids = []; }
+    const people = ids.filter(id => !skip.has(id)).map(id => {
+      const c = (state.contacts && state.contacts[id]) || {};
+      return { id, username: c.username, nickname: c.nickname, avatar: c.avatar };
+    });
+    const draw = () => {
+      list.innerHTML = '';
+      const q = inp.value.trim().toLowerCase();
+      const rows = people.filter(p => !q || `${p.nickname || ''} ${p.username || ''}`.toLowerCase().includes(q));
+      if (!rows.length) list.appendChild(hintNode(people.length ? 'ไม่พบเพื่อนชื่อนี้' : 'ชวนได้เฉพาะคนที่เป็นเพื่อนกันแล้ว (เพิ่มเพื่อนก่อน)'));
+      rows.forEach(p => {
+        const row = el('div', 'fam-row');
+        row.appendChild(avatarNode(p));
+        const nm = el('div', 'fam-row-name');
+        nm.appendChild(el('strong', '', p.nickname || p.username || 'ผู้ใช้'));
+        if (p.username) nm.appendChild(el('span', 'hint', '@' + p.username));
+        row.appendChild(nm);
+        const b = chip2('ชวน', async () => {
+          b.disabled = true;
+          const { error } = await sb.rpc('fam_invite', { p_user: p.id });
+          if (error) { b.disabled = false; return extErr(error); }
+          toast(`ส่งคำเชิญให้ ${p.nickname || p.username} แล้ว รอเขากดเข้าร่วม`, 'success');
+          closeM('fam-pick-modal');
+          loadFam();
+        });
+        b.className = 'chip primary';
+        row.appendChild(b);
+        list.appendChild(row);
+      });
+    };
+    inp.oninput = draw;
+    draw();
+    body.appendChild(actionBtn('ปิด', () => closeM('fam-pick-modal')));
+    openModal('fam-pick-modal');
+  }
+
+  // การ์ดคำเชิญในแชท
+  function buildFamInviteCard(m) {
+    const meta = m.rmeta || {};
+    const st = meta.status || 'pending';
+    const card = el('div', 'ext-msg fam-msg st-' + st);
+    const head = el('div', 'ext-msg-head');
+    head.appendChild(el('strong', '', '👨‍👩‍👧 คำเชิญเข้าครอบครัว'));
+    head.appendChild(el('span', 'ext-buy-status', { pending: 'รอตอบ', accepted: 'เข้าร่วมแล้ว', declined: 'ปฏิเสธแล้ว', cancelled: 'ยกเลิกแล้ว' }[st] || ''));
+    card.appendChild(head);
+    card.appendChild(el('div', 'ext-msg-body', m.isMe ? `คุณชวนเข้าครอบครัว "${meta.family_name || ''}"` : `${meta.inviter || 'ผู้ใช้'} ชวนคุณเข้าครอบครัว "${meta.family_name || ''}" ใช้แพ็กเกจและส่วนขยายแบบครอบครัวร่วมกัน`));
+    if (st === 'pending' && !m.isMe) {
+      const a = el('div', 'ext-msg-acts');
+      const ok = chip2('เข้าร่วม', () => respondInvite(meta.invite_id, true, meta.family_name));
+      ok.className = 'chip primary';
+      a.append(ok, chip2('ปฏิเสธ', () => respondInvite(meta.invite_id, false, meta.family_name)));
+      card.appendChild(a);
+    } else if (st === 'accepted' || m.isMe) {
+      const a = el('div', 'ext-msg-acts');
+      a.appendChild(chip2('ดูครอบครัว', openFamily));
+      card.appendChild(a);
+    }
+    return card;
+  }
+  function buildFamInfoCard(m) {
+    const card = el('div', 'ext-msg fam-msg');
+    const head = el('div', 'ext-msg-head');
+    head.appendChild(el('strong', '', '👨‍👩‍👧 ครอบครัว'));
+    card.appendChild(head);
+    card.appendChild(el('div', 'ext-msg-body', m.text || ''));
+    const a = el('div', 'ext-msg-acts');
+    a.appendChild(chip2('ดูครอบครัว', openFamily));
+    card.appendChild(a);
+    return card;
+  }
+
+  function refreshEnt() {
+    try { if (typeof loadEntitlements === 'function') loadEntitlements(); } catch (x) { /* ไม่เป็นไร */ }
+    refreshAll();
+  }
+
+  // ---------- ซื้อแพ็กเกจแบบครอบครัว (ผ่านน้องโบ๊ะบ๊ะ เหมือนแบบคนเดียว) ----------
+  async function buyPackageFamily(product, plan) {
+    if (!hasPackages()) return;
+    if (!myFam()) {
+      const go = await confirmDialog('ต้องมีครอบครัวก่อน', `แพ็กเกจครอบครัวใช้ได้ทุกคนในครอบครัว (สูงสุด ${FAM_MAX} คน)\nสร้างครอบครัวหรือเข้าร่วมครอบครัวก่อน แล้วค่อยกลับมาซื้อ`, 'ไปที่ครอบครัว');
+      if (go) { closeM('ext-modal'); closeM('plan-modal'); openFamily(); }
+      return;
+    }
+    if (bo.busy) return;
+    const pr = PRODUCTS[product];
+    const price = EXT.prices.family[plan];
+    const fname = myFam().name;
+    const open = (bo.purchases || []).find(r => r.product === product);
+    const ok = await confirmDialog('ขอซื้อแพ็กเกจครอบครัว',
+      `${pr.icon} ${pr.name} · 👨‍👩‍👧 ครอบครัว "${fname}"\n${PLAN_NAMES[plan]} · ${baht(price)}\nทุกคนในครอบครัวใช้ได้ (คนที่ออกจากครอบครัวจะใช้ไม่ได้)\n\nน้องจะส่งคำขอซื้อให้แอดมิน แล้วแจ้งวิธีโอนเงิน` + (open ? '\n(คุณมีคำขอซื้อแพ็กเกจนี้ค้างอยู่ จะเปลี่ยนเป็นแบบที่เลือกนี้)' : ''), 'ขอซื้อ');
+    if (!ok) return;
+    bo.busy = true;
+    try {
+      const out = await invokeAi({ mode: 'purchase', product, plan, scope: 'family' });
+      await loadMyPurchase();
+      closeM('plan-modal');
+      closeM('ext-modal');
+      loadBoHistory();
+      bo.msgs.push({ role: 'user', text: `ขอซื้อ ${pr.name} แบบครอบครัว ${PLAN_NAMES[plan]} ${baht(price)}` });
+      bo.msgs.push({
+        role: 'model', local: true,
+        text: `ส่งคำขอซื้อ ${pr.name} แบบครอบครัว "${out.family_name || fname}" (${PLAN_NAMES[plan]} ${baht(out.price)}) ให้แอดมินแล้วครับ ✅ เปิดใช้งานแล้วทุกคนในครอบครัวใช้ได้\n\n` +
+          (out.pay_info ? `วิธีชำระเงิน:\n${out.pay_info}\n\n` : 'แอดมินจะแจ้งวิธีชำระเงินให้ทางข้อความครับ\n\n') +
+          'โอนเสร็จแล้ว กดปุ่ม "🧾 ส่งสลิป" ด้านล่าง แล้วเลือกรูปสลิป น้องจะส่งต่อให้แอดมิน แอดมินตรวจแล้วจะเปิดใช้งานให้และแจ้งทางแชทครับ'
+      });
+      saveBoHistory();
+      openModal('bo-modal');
+      hideBoBubble(false);
+      attachQrToLastBo();
+    } catch (e) {
+      toast(e.message === 'no_family' ? 'คุณยังไม่ได้อยู่ในครอบครัว' : e.message === 'admin_no_need' ? 'คุณเป็นแอดมิน ใช้ได้ทุกอย่างอยู่แล้ว' : (e.message === 'no_admin' ? 'ยังไม่มีบัญชีแอดมินในระบบ' : aiErrorText(e)), 'error');
+    }
+    bo.busy = false;
+    renderBoChat();
+  }
+
+  // ปุ่มแบบครอบครัวของแพ็กเกจ (ใช้ทั้งในร้านและหน้าแพ็กเกจเดิม)
+  function famPkgButtons(p, compact) {
+    const out = [];
+    const ent = state.ent && state.ent[p];
+    if (ent && ent.admin) return out;
+    if (ent && ent.family && ent.family_lifetime) return out;   // ครอบครัวมีตลอดชีพแล้ว
+    const famActive = ent && ent.family && ent.active;
+    ['monthly', 'lifetime'].forEach(plan => {
+      const label = `👨‍👩‍👧 ${famActive && plan === 'monthly' ? 'ต่ออายุครอบครัว 1 เดือน' : 'ครอบครัว ' + (plan === 'monthly' ? 'รายเดือน' : 'ตลอดชีพ')} ${baht(EXT.prices.family[plan])}`;
+      const b = compact ? chip2(label, () => buyPackageFamily(p, plan)) : actionBtn(label, () => buyPackageFamily(p, plan), 'secondary-btn fam-btn');
+      if (compact) b.classList.add('fam-chip');
+      out.push(b);
+    });
+    return out;
+  }
+
+  // ---------- แอดมิน: ตั้งราคาแพ็กเกจ ----------
+  function adminPriceBlock() {
+    const box = el('div', 'ext-admin');
+    box.appendChild(el('div', 'list-title', '💰 ราคาแพ็กเกจ (AI และแปลภาษา / สตรีม ใช้ราคาเดียวกัน)'));
+    const grid = el('div', 'ext-price-grid');
+    const P = EXT.prices;
+    const inputs = {};
+    [['single', 'monthly', 'คนเดียว · รายเดือน'], ['single', 'lifetime', 'คนเดียว · ตลอดชีพ'],
+     ['family', 'monthly', `ครอบครัว · รายเดือน`], ['family', 'lifetime', `ครอบครัว · ตลอดชีพ`]].forEach(([s, pl, label]) => {
+      const g = el('div', 'input-group');
+      const i = document.createElement('input');
+      i.type = 'number'; i.min = 1; i.max = 100000; i.inputMode = 'numeric';
+      i.value = P[s][pl];
+      inputs[s + '_' + pl] = i;
+      g.append(el('label', '', label + ' (บาท)'), i);
+      grid.appendChild(g);
+    });
+    box.appendChild(grid);
+    box.appendChild(el('div', 'hint', `แบบครอบครัว: ทุกคนในครอบครัวใช้ได้ (สูงสุด ${FAM_MAX} คน) · ราคาใหม่ใช้กับคำขอซื้อที่ส่งหลังบันทึก`));
+    const save = chip2('💾 บันทึกราคา', async () => {
+      const v = k => parseInt(inputs[k].value, 10);
+      const { data, error } = await sb.rpc('ext_admin_set_prices', {
+        p_single_monthly: v('single_monthly'), p_single_lifetime: v('single_lifetime'),
+        p_family_monthly: v('family_monthly'), p_family_lifetime: v('family_lifetime')
+      });
+      if (error) return extErr(error);
+      if (data) EXT.prices = data;
+      await loadPrices();
+      toast('บันทึกราคาแพ็กเกจแล้ว', 'success');
+      renderStore();
+    });
+    save.className = 'chip primary';
+    const row = el('div', 'ext-acts');
+    row.appendChild(save);
+    box.appendChild(row);
+    return box;
+  }
+
+  // แอดมินกดเปิดแพ็กเกจจากการ์ด/แผงเดิม: ถ้าเป็นคำขอแบบครอบครัว เปิดให้ทั้งครอบครัวแทน
+  function hookAdminGrant() {
+    const base = window.adminGrant;
+    if (typeof base !== 'function' || base.__fam) return;
+    const fn = async function (userId, product, months, lifetime, requestId) {
+      if (requestId) {
+        const { data: scope, error } = await sb.rpc('fam_request_scope', { p_request: requestId });
+        if (!error && scope === 'family') {
+          const { data, error: e2 } = await sb.rpc('fam_admin_grant', { p_request: requestId, p_months: lifetime ? null : months, p_lifetime: !!lifetime });
+          if (e2) {
+            if (/family_gone/.test(e2.message || '')) {
+              const ok = await confirmDialog('ครอบครัวถูกลบแล้ว', 'ครอบครัวของผู้ซื้อไม่มีแล้ว จะเปิดให้ผู้ซื้อคนเดียวแทนไหม?', 'เปิดให้คนเดียว');
+              if (ok) return base(userId, product, months, lifetime, requestId);
+              return false;
+            }
+            extErr(e2);
+            return false;
+          }
+          toast(`เปิดแพ็กเกจครอบครัว "${data && data.family_name}" แล้ว ` + (lifetime ? 'ตลอดชีพ' : `ใช้ได้ถึง ${fmtDate(new Date(new Date(data.expires_at).getTime() - 1000).toISOString())}`), 'success');
+          return true;
+        }
+      }
+      return base(userId, product, months, lifetime, requestId);
+    };
+    fn.__fam = true;
+    window.adminGrant = fn;
+  }
+
+  // ป้าย "ครอบครัว" ต่อท้ายสถานะแพ็กเกจในตั้งค่า
+  function hookEntLabel() {
+    const base = window.entLabel;
+    if (typeof base !== 'function' || base.__fam) return;
+    const fn = function (p) {
+      const t = base.apply(this, arguments);
+      const e = state.ent && state.ent[p];
+      return e && e.family && e.active ? `${t} · 👨‍👩‍👧 ครอบครัว` : t;
+    };
+    fn.__fam = true;
+    window.entLabel = fn;
+  }
+
+  // หน้าแพ็กเกจเดิม: เพิ่มปุ่มแบบครอบครัว
+  function hookPlanCard() {
+    const base = window.buildPlanCard;
+    if (typeof base !== 'function' || base.__fam) return;
+    const fn = function () {
+      const card = base.apply(this, arguments);
+      try {
+        if (isAdmin() || !EXT.famReady) return card;
+        const box = el('div', 'plan-prod fam-plan');
+        const h = el('div', 'plan-head');
+        h.appendChild(el('span', '', '👨‍👩‍👧 แบบครอบครัว'));
+        h.appendChild(el('span', 'plan-status' + (myFam() ? ' ent-on' : ''), myFam() ? myFam().name : 'ยังไม่มีครอบครัว'));
+        box.appendChild(h);
+        box.appendChild(el('div', 'plan-desc', `ซื้อครั้งเดียว ทุกคนในครอบครัวใช้ได้ (สูงสุด ${FAM_MAX} คน) ใครออกจากครอบครัวจะใช้ไม่ได้`));
+        Object.keys(PRODUCTS).forEach(p => {
+          const row = el('div', 'plan-btns');
+          row.appendChild(el('span', 'fam-plan-name', `${PRODUCTS[p].icon} ${PRODUCTS[p].name}`));
+          famPkgButtons(p, false).forEach(b => row.appendChild(b));
+          if (row.children.length > 1) box.appendChild(row);
+          else box.appendChild(el('div', 'hint', `${PRODUCTS[p].icon} ${PRODUCTS[p].name}: ครอบครัวใช้ได้ตลอดชีพแล้ว`));
+        });
+        if (!myFam()) box.appendChild(actionBtn('ไปที่ครอบครัว (สร้าง / เข้าร่วม)', () => { closeM('plan-modal'); openFamily(); }, 'secondary-btn'));
+        const note = card.querySelector('.plan-note');
+        card.insertBefore(box, note || null);
+      } catch (x) { console.error('fam plan', x); }
+      return card;
+    };
+    fn.__fam = true;
+    window.buildPlanCard = fn;
+  }
+
+  // คำขอซื้อแพ็กเกจของฉัน: รู้ด้วยว่าแบบครอบครัวไหม (ใช้ติดป้ายในแถบส่งสลิป)
+  function hookMyPurchase() {
+    const base = window.loadMyPurchase;
+    if (typeof base !== 'function' || base.__fam) return;
+    const fn = async function () {
+      const r = await base.apply(this, arguments);
+      try {
+        const list = (typeof bo !== 'undefined' && bo && bo.purchases) || [];
+        if (list.length) {
+          const { data } = await sb.from('purchase_requests').select('id, scope').in('id', list.map(x => x.id));
+          (data || []).forEach(d => { const x = list.find(y => y.id === d.id); if (x) x.scope = d.scope; });
+        }
+      } catch (x) { /* ไม่เป็นไร */ }
+      return r;
+    };
+    fn.__fam = true;
+    window.loadMyPurchase = fn;
+  }
+  function famSlipLabels() {
+    const bar = $('bo-slip-bar');
+    if (!bar) return;
+    const list = (typeof bo !== 'undefined' && bo && bo.purchases) || [];
+    const rows = [...bar.querySelectorAll('.slip-row:not(.ext-slip-row)')];
+    rows.forEach((row, i) => {
+      const r = list[i];
+      const sp = row.querySelector('span');
+      if (r && r.scope === 'family' && sp && !sp.textContent.includes('ครอบครัว')) sp.textContent = sp.textContent.replace(' · ', ' · 👨‍👩‍👧 ครอบครัว · ');
+    });
+    bar.querySelectorAll('.ext-slip-row').forEach(row => {
+      const r = (EXT.myReqs || []).find(x => row.dataset.req === x.id);
+      const sp = row.querySelector('span');
+      if (r && r.scope === 'family' && sp && !sp.textContent.includes('ครอบครัว')) sp.textContent = sp.textContent.replace(' · ส่วนขยาย', ' · ส่วนขยาย 👨‍👩‍👧 ครอบครัว');
+    });
+  }
+
+  function injectFamily() {
+    // ตั้งค่า: กลุ่ม "ครอบครัว" ต่อจาก "แพ็กเกจและ AI"
+    const groups = [...document.querySelectorAll('#settings-modal details.set-group')];
+    const pkg = groups.find(g => /แพ็กเกจและ AI/.test((g.querySelector('summary') || {}).textContent || ''));
+    if (pkg && !$('pkg-price-hint')) {
+      const h = [...pkg.querySelectorAll('.hint')].pop();
+      if (h && /บาท/.test(h.textContent)) { h.id = 'pkg-price-hint'; h.textContent = priceLine(); }
+    }
+    if (!$('set-family-group')) {
+      const d = el('details', 'set-group');
+      d.id = 'set-family-group';
+      d.appendChild(el('summary', '', '👨‍👩‍👧 ครอบครัว'));
+      const row = el('div', 'set-row');
+      const w = el('div');
+      w.append(el('strong', '', 'ครอบครัวของฉัน'));
+      const st = el('span', 'hint ent-status', 'กำลังตรวจสอบ…');
+      st.id = 'fam-set-status';
+      w.appendChild(st);
+      row.appendChild(w);
+      d.appendChild(row);
+      const stack = el('div', 'stack');
+      stack.appendChild(actionBtn('จัดการครอบครัว: สร้าง · ชวน · ออก', () => { closeM('settings-modal'); openFamily(); }, 'secondary-btn'));
+      d.appendChild(stack);
+      d.appendChild(el('span', 'hint', `ครอบครัวมีได้ไม่เกิน ${FAM_MAX} คน ซื้อแพ็กเกจหรือส่วนขยายแบบครอบครัว ทุกคนในครอบครัวใช้ได้`));
+      const anchor = pkg || $('set-admin-group');
+      if (anchor && anchor.parentNode) anchor.parentNode.insertBefore(d, pkg ? pkg.nextSibling : anchor);
+    }
+    renderFamSetting();
   }
 
   // ---------- ต่อเข้ากับแอปเดิม (ห่อฟังก์ชันเดิม ไม่แก้ app.js) ----------
@@ -1237,7 +1853,11 @@
   async function onEnter() {
     if (!currentUser) return;
     injectStatic();
+    injectFamily();
+    hookAdminGrant(); hookEntLabel(); hookPlanCard(); hookMyPurchase();
     watchMessages();
+    loadPrices();
+    loadFam();
     await loadCatalog();
     if (!EXT.ready) return;
     try { EXT.adminId = localStorage.getItem('darkchat_ext_admin') || null; } catch (x) { /* ไม่เป็นไร */ }
@@ -1266,7 +1886,7 @@
   }
 
   wrap('enterApp', onEnter);
-  wrap('renderSlipBar', extSlipRows);
+  wrap('renderSlipBar', () => { extSlipRows(); famSlipLabels(); });
   wrap('buyPackage', () => { attachQrToLastBo(); });
   wrap('selectChat', () => { loadRoom(); });
   wrap('backToList', () => { EXT.roomKey = null; EXT.roomExt = []; renderHeaderIcons(); });
@@ -1297,6 +1917,7 @@
   window.openExtStore = openExtStore;
   window.openRoomExtSheet = openRoomExtSheet;
   window.openExtNotify = openExtNotify;
+  window.openFamily = openFamily;
 
   // เผื่อสคริปต์นี้โหลดหลังจากล็อกอินไปแล้ว
   if (typeof currentUser !== 'undefined' && currentUser) onEnter();
