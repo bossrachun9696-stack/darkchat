@@ -1879,6 +1879,216 @@
     renderFamSetting();
   }
 
+  // =====================================================================
+  // รหัสกู้คืนบัญชี (ใช้ร่วมกับสมุดบ้าน · ต้องรัน supabase-v9.sql)
+  // =====================================================================
+  const REC_WARN = '⚠️ จดรหัสนี้เก็บไว้ให้ดี ใช้ตั้งรหัสผ่านใหม่เมื่อลืมรหัสผ่าน ถ้าลืมทั้งสองอย่างจะเข้าบัญชีนี้ไม่ได้ ใช้รหัสเดียวกันทั้ง DarkChat และสมุดบ้าน';
+  const REC_KEY = 'darkchat_rec_pending';
+  const recMissing = err => /Could not find the function|does not exist/i.test((err && err.message) || '');
+
+  function recInput(id, label, type) {
+    const g = el('div', 'input-group');
+    const l = el('label', '', label);
+    l.htmlFor = id;
+    const i = document.createElement('input');
+    i.id = id;
+    i.type = type || 'text';
+    i.autocomplete = type === 'password' ? 'new-password' : 'off';
+    i.setAttribute('autocapitalize', 'off');
+    i.spellcheck = false;
+    i.maxLength = 64;
+    g.append(l, i);
+    return g;
+  }
+
+  // หน้าสมัครสมาชิก: ช่องรหัสกู้คืน (บังคับ)
+  function injectRecRegister() {
+    const form = $('register-form');
+    if (!form || $('reg-recovery')) return;
+    const g = recInput('reg-recovery', 'รหัสกู้คืนบัญชี (อย่างน้อย 6 ตัว)');
+    g.querySelector('input').placeholder = 'ตั้งเองให้จำได้ เช่น คำ + ตัวเลข';
+    g.appendChild(el('div', 'rec-warn', REC_WARN));
+    const btn = form.querySelector('button[type=submit]');
+    form.insertBefore(g, btn || null);
+
+    const base = window.handleRegister;
+    if (typeof base === 'function' && !base.__rec) {
+      const fn = function (e) {
+        const code = ($('reg-recovery').value || '').trim();
+        if (code.length < 6) {
+          if (e && e.preventDefault) e.preventDefault();
+          toast('ตั้งรหัสกู้คืนอย่างน้อย 6 ตัว แล้วจดเก็บไว้', 'error');
+          $('reg-recovery').focus();
+          return;
+        }
+        // เก็บไว้ชั่วคราว ตั้งให้ทันทีหลังเข้าสู่ระบบครั้งแรก (กรณีต้องยืนยันอีเมลก่อน)
+        try { localStorage.setItem(REC_KEY, JSON.stringify({ email: ($('reg-email').value || '').trim().toLowerCase(), code })); } catch (x) { /* ไม่เป็นไร */ }
+        return base.apply(this, arguments);
+      };
+      fn.__rec = true;
+      window.handleRegister = fn;
+    }
+  }
+
+  // ลืมรหัสผ่าน: อีเมล + รหัสกู้คืน -> ตั้งรหัสผ่านใหม่
+  function hookForgot() {
+    const base = window.forgotPassword;
+    if (typeof base !== 'function' || base.__rec) return;
+    const fn = function () { openRecover(base); };
+    fn.__rec = true;
+    window.forgotPassword = fn;
+  }
+  function openRecover(viaEmail) {
+    ensureModal('rec-modal', 'confirm-box rec-box');
+    const body = $('rec-modal-body');
+    body.innerHTML = '';
+    body.appendChild(el('h3', '', '🔑 ลืมรหัสผ่าน'));
+    body.appendChild(el('p', 'ext-desc', 'ใส่อีเมลและรหัสกู้คืนที่ตั้งไว้ แล้วตั้งรหัสผ่านใหม่ (ใช้ได้ทั้ง DarkChat และสมุดบ้าน)'));
+    const form = document.createElement('form');
+    form.className = 'rec-form';
+    const gE = recInput('rec-email', 'อีเมล', 'email');
+    gE.querySelector('input').value = (($('login-email') || {}).value || '').trim();
+    const gC = recInput('rec-code', 'รหัสกู้คืน');
+    const gP = recInput('rec-pass', 'รหัสผ่านใหม่ (อย่างน้อย 6 ตัว)', 'password');
+    const gP2 = recInput('rec-pass2', 'ยืนยันรหัสผ่านใหม่', 'password');
+    const err = el('div', 'rec-err');
+    const go = el('button', 'primary-btn', 'ตั้งรหัสผ่านใหม่');
+    go.type = 'submit';
+    form.append(gE, gC, gP, gP2, err, go);
+    form.onsubmit = async ev => {
+      ev.preventDefault();
+      const email = $('rec-email').value.trim(), code = $('rec-code').value.trim(), p1 = $('rec-pass').value, p2 = $('rec-pass2').value;
+      err.textContent = '';
+      if (!/^\S+@\S+\.\S+$/.test(email)) return (err.textContent = 'กรอกอีเมลให้ถูกรูปแบบ');
+      if (!code) return (err.textContent = 'กรอกรหัสกู้คืน');
+      if (p1.length < 6) return (err.textContent = 'รหัสผ่านใหม่ต้องมีอย่างน้อย 6 ตัวอักษร');
+      if (p1 !== p2) return (err.textContent = 'รหัสผ่านใหม่สองช่องไม่ตรงกัน');
+      go.disabled = true;
+      try {
+        const { data: r, error } = await sb.rpc('acct_recover', { p_email: email, p_code: code, p_new_password: p1 });
+        if (error) { err.textContent = recMissing(error) ? 'ระบบรหัสกู้คืนยังไม่เปิด (แอดมินต้องรัน supabase-v9.sql)' : extErrText(error); return; }
+        if (!r || !r.ok) {
+          err.textContent = r && r.reason === 'locked' ? `ใส่รหัสกู้คืนผิดหลายครั้ง ลองใหม่ในอีก ${r.minutes || 15} นาที`
+            : r && r.reason === 'weak_password' ? 'รหัสผ่านใหม่ต้องมีอย่างน้อย 6 ตัวอักษร'
+            : `อีเมลหรือรหัสกู้คืนไม่ถูกต้อง${r && r.left !== undefined ? ` (ลองได้อีก ${r.left} ครั้ง)` : ''}`;
+          return;
+        }
+        closeM('rec-modal');
+        toast('ตั้งรหัสผ่านใหม่แล้ว กำลังเข้าสู่ระบบ…', 'success');
+        if ($('login-email')) $('login-email').value = email;
+        if ($('login-password')) $('login-password').value = p1;
+        if (typeof window.handleLogin === 'function') window.handleLogin({ preventDefault() {} });
+      } finally { go.disabled = false; }
+    };
+    body.appendChild(form);
+    const alt = el('div', 'rec-alt');
+    alt.appendChild(el('span', 'hint', 'ยังไม่เคยตั้งรหัสกู้คืน? '));
+    const viaMail = el('button', 'link-btn', 'ส่งลิงก์ตั้งรหัสผ่านทางอีเมลแทน');
+    viaMail.type = 'button';
+    viaMail.onclick = () => {
+      if ($('login-email')) $('login-email').value = $('rec-email').value.trim();
+      closeM('rec-modal');
+      viaEmail();
+    };
+    alt.appendChild(viaMail);
+    body.appendChild(alt);
+    body.appendChild(actionBtn('ยกเลิก', () => closeM('rec-modal')));
+    openModal('rec-modal');
+    setTimeout(() => ($('rec-email').value ? $('rec-code') : $('rec-email')).focus(), 60);
+  }
+  function extErrText(error) {
+    const m = (error && error.message) || String(error);
+    return /bad_recovery_code/.test(m) ? 'รหัสกู้คืนต้องมี 6–64 ตัวอักษร' : m;
+  }
+
+  // ตั้ง / เปลี่ยนรหัสกู้คืน (forced = ยังไม่เคยตั้ง ต้องตั้งก่อนใช้งาน ปิดไม่ได้)
+  function openRecSet(forced) {
+    let ov = $('rec-set');
+    if (ov) ov.remove();
+    ov = el('div', 'rec-set-overlay');
+    ov.id = 'rec-set';
+    const box = el('form', 'rec-set-box');
+    box.appendChild(el('h3', '', forced ? '🔑 ตั้งรหัสกู้คืนก่อนใช้งาน' : '🔑 ตั้ง / เปลี่ยนรหัสกู้คืนบัญชี'));
+    box.appendChild(el('div', 'rec-warn', REC_WARN));
+    box.append(recInput('rec-set-1', 'รหัสกู้คืน (อย่างน้อย 6 ตัว)'), recInput('rec-set-2', 'พิมพ์อีกครั้ง'));
+    const err = el('div', 'rec-err');
+    const save = el('button', 'primary-btn', 'บันทึกรหัสกู้คืน');
+    save.type = 'submit';
+    box.append(err, save);
+    if (!forced) {
+      const c = el('button', 'secondary-btn', 'ยกเลิก');
+      c.type = 'button';
+      c.onclick = () => ov.remove();
+      box.appendChild(c);
+      ov.onclick = ev => { if (ev.target === ov) ov.remove(); };
+    }
+    box.onsubmit = async ev => {
+      ev.preventDefault();
+      const a = $('rec-set-1').value.trim(), b = $('rec-set-2').value.trim();
+      err.textContent = '';
+      if (a.length < 6) return (err.textContent = 'รหัสกู้คืนต้องมีอย่างน้อย 6 ตัว');
+      if (a !== b) return (err.textContent = 'พิมพ์สองช่องไม่ตรงกัน');
+      save.disabled = true;
+      const { error } = await sb.rpc('acct_set_recovery', { p_code: a });
+      save.disabled = false;
+      if (error) return (err.textContent = extErrText(error));
+      ov.remove();
+      toast('บันทึกรหัสกู้คืนแล้ว อย่าลืมจดเก็บไว้', 'success');
+      paintRecSetting({ has_code: true, updated_at: new Date().toISOString() });
+    };
+    ov.appendChild(box);
+    document.body.appendChild(ov);
+    setTimeout(() => $('rec-set-1').focus(), 60);
+  }
+
+  async function checkRecovery() {
+    if (!currentUser) return;
+    // สมัครแล้วยืนยันอีเมลก่อน: ตั้งรหัสที่กรอกไว้ตอนสมัครให้เลย
+    try {
+      const p = JSON.parse(localStorage.getItem(REC_KEY) || 'null');
+      if (p && p.code && (!p.email || p.email === String(currentUser.email || '').toLowerCase())) {
+        const { error } = await sb.rpc('acct_set_recovery', { p_code: p.code });
+        if (!error || !recMissing(error)) localStorage.removeItem(REC_KEY);
+      }
+    } catch (x) { /* ไม่เป็นไร */ }
+    const { data, error } = await sb.rpc('acct_recovery_status');
+    if (error) { paintRecSetting(recMissing(error) ? null : { has_code: true }); return; }
+    paintRecSetting(data);
+    if (data && !data.has_code) openRecSet(true);
+  }
+  function paintRecSetting(st) {
+    const s = $('rec-set-status');
+    if (!s) return;
+    s.textContent = !st ? 'ยังไม่ได้เปิดใช้ (ต้องรัน supabase-v9.sql)'
+      : st.has_code ? 'ตั้งไว้แล้ว' + (st.updated_at ? ' · เปลี่ยนล่าสุด ' + new Date(st.updated_at).toLocaleDateString('th-TH', { day: 'numeric', month: 'short', year: 'numeric' }) : '') + ' · ใช้ร่วมกับสมุดบ้าน'
+      : 'ยังไม่ได้ตั้ง';
+    s.classList.toggle('ent-on', !!(st && st.has_code));
+  }
+  function injectRecSetting() {
+    if ($('set-recovery-group')) return;
+    const anchor = $('set-family-group') || [...document.querySelectorAll('#settings-modal details.set-group')].pop();
+    if (!anchor || !anchor.parentNode) return;
+    const d = el('details', 'set-group');
+    d.id = 'set-recovery-group';
+    d.appendChild(el('summary', '', '🔑 รหัสกู้คืนบัญชี'));
+    const row = el('div', 'set-row');
+    const w = el('div');
+    w.appendChild(el('strong', '', 'ใช้ตั้งรหัสผ่านใหม่เมื่อลืม'));
+    const st = el('span', 'hint ent-status', 'กำลังตรวจสอบ…');
+    st.id = 'rec-set-status';
+    w.appendChild(st);
+    row.appendChild(w);
+    d.appendChild(row);
+    const stack = el('div', 'stack');
+    stack.appendChild(actionBtn('ตั้ง / เปลี่ยนรหัสกู้คืน', () => { closeM('settings-modal'); openRecSet(false); }, 'secondary-btn'));
+    d.appendChild(stack);
+    anchor.parentNode.insertBefore(d, anchor.nextSibling);
+  }
+
+  // หน้าเข้าสู่ระบบอยู่ตั้งแต่เปิดแอป: ใส่ช่องรหัสกู้คืนและเปลี่ยนปุ่มลืมรหัสผ่านทันที
+  injectRecRegister();
+  hookForgot();
+
   // ---------- ต่อเข้ากับแอปเดิม (ห่อฟังก์ชันเดิม ไม่แก้ app.js) ----------
   function wrap(name, after) {
     const orig = window[name];
@@ -1896,6 +2106,8 @@
     if (!currentUser) return;
     injectStatic();
     injectFamily();
+    injectRecSetting();
+    checkRecovery();
     hookAdminGrant(); hookEntLabel(); hookPlanCard(); hookMyPurchase();
     watchMessages();
     loadPrices();
