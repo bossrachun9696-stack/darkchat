@@ -235,19 +235,69 @@ window.addEventListener('DOMContentLoaded', async () => {
 
   if (!sb) { toast('โหลด Supabase SDK ไม่สำเร็จ ตรวจสอบอินเทอร์เน็ตแล้วรีเฟรช', 'error'); return; }
 
-  try {
-    const { data: { session } } = await sb.auth.getSession();
-    if (session && RECOVERY_LINK) openRecovery();
-    else if (session) startSession(session.user, false);
-  } catch (err) {
-    toast(thaiError(err), 'error');
-  }
-
   sb.auth.onAuthStateChange((event) => {
-    if (event === 'SIGNED_OUT' && currentUser) leaveApp();
+    if (event === 'SIGNED_OUT' && currentUser) {
+      // ไม่ได้กดออกเอง: เซสชันหมดอายุหรือถูกยกเลิกที่เซิร์ฟเวอร์
+      if (!signingOut) noteSignOut('เซสชันหมดอายุหรือถูกยกเลิก (เช่น ตั้งรหัสผ่านใหม่ / สั่งออกจากระบบทุกเครื่อง)');
+      leaveApp();
+    }
     if (event === 'PASSWORD_RECOVERY') openRecovery();
   });
+
+  await bootSession();
+  $('boot-retry').onclick = () => bootSession();
 });
+
+// ---------- เปิดแอป: ใช้บัญชีที่เข้าสู่ระบบค้างไว้ (ลองซ้ำถ้าเน็ตยังไม่พร้อม เช่น เพิ่งอัปเดตไฟล์ / เพิ่งปลดล็อกมือถือ) ----------
+let signingOut = false;
+const hasStoredSession = () => { try { return Object.keys(localStorage).some(k => /^sb-.+-auth-token$/.test(k)); } catch (e) { return false; } };
+function bootDone() {
+  document.documentElement.classList.remove('has-session');
+  $('boot-splash').classList.add('hidden-element');
+}
+async function bootSession() {
+  $('boot-retry').classList.add('hidden-element');
+  $('boot-text').textContent = 'กำลังเปิด DarkChat…';
+  for (let i = 0; i < 4; i++) {
+    let session = null, failed = false;
+    try {
+      const { data, error } = await sb.auth.getSession();
+      session = data && data.session;
+      if (error) failed = true;
+    } catch (err) { failed = true; }
+    if (session) {
+      bootDone();
+      if (RECOVERY_LINK) openRecovery(); else startSession(session.user, false);
+      return;
+    }
+    // ไม่มีบัญชีค้างไว้จริงๆ: ไปหน้าเข้าสู่ระบบ
+    if (!hasStoredSession() && !failed) break;
+    if (!hasStoredSession()) break;
+    $('boot-text').textContent = i === 0 ? 'กำลังเชื่อมต่อ…' : `กำลังเชื่อมต่อ… (ครั้งที่ ${i + 1})`;
+    await new Promise(r => setTimeout(r, 1200 * (i + 1)));
+  }
+  if (hasStoredSession()) {
+    // ยังมีบัญชีค้างอยู่ในเครื่อง แต่เชื่อมต่อไม่ได้ (เน็ตหลุด): ไม่ส่งไปหน้าใส่อีเมล ให้กดลองใหม่
+    $('boot-text').textContent = 'ยังเชื่อมต่อเซิร์ฟเวอร์ไม่ได้ ตรวจอินเทอร์เน็ตแล้วกดลองอีกครั้ง';
+    $('boot-retry').classList.remove('hidden-element');
+    return;
+  }
+  bootDone();
+  showSignOutNote();
+}
+function noteSignOut(reason) {
+  try { localStorage.setItem('darkchat_signout_note', JSON.stringify({ reason, at: Date.now() })); } catch (e) { /* ไม่เป็นไร */ }
+  showSignOutNote();
+}
+function showSignOutNote() {
+  const box = $('signout-note');
+  if (!box) return;
+  let n = null;
+  try { n = JSON.parse(localStorage.getItem('darkchat_signout_note') || 'null'); } catch (e) { n = null; }
+  if (!n || Date.now() - n.at > 3 * 86400000) { box.classList.add('hidden-element'); return; }
+  box.textContent = `ออกจากระบบเมื่อ ${new Date(n.at).toLocaleString('th-TH', { dateStyle: 'medium', timeStyle: 'short' })} · ${n.reason}`;
+  box.classList.remove('hidden-element');
+}
 
 // เริ่มใช้งานหลังยืนยันตัวตน: ยังไม่มี PIN -> ตั้ง PIN, มี PIN และเปิดแอปใหม่ -> ใส่ PIN
 function startSession(user, fresh) {
@@ -310,6 +360,8 @@ async function handleLogin(e) {
     const { data, error } = await sb.auth.signInWithPassword({ email, password });
     if (error) throw error;
     $('login-password').value = '';
+    try { localStorage.removeItem('darkchat_signout_note'); } catch (x) { /* ไม่เป็นไร */ }
+    $('signout-note').classList.add('hidden-element');
     startSession(data.user, true);
   } catch (err) {
     toast('เข้าสู่ระบบไม่สำเร็จ: ' + thaiError(err), 'error');
@@ -342,7 +394,9 @@ async function logoutNow(userId) {
     }
   } catch (e) { /* ไม่เป็นไร */ }
   try { await sb.from('devices').delete().eq('device_key', deviceKey()); } catch (e) { /* ไม่เป็นไร */ }
+  signingOut = true;
   try { await sb.auth.signOut({ scope: 'local' }); } catch (err) { console.warn(err); }
+  signingOut = false;
   if (currentUser) leaveApp();
 }
 
@@ -5460,6 +5514,7 @@ async function forceSignOut() {
   try { await sb.from('e2ee_keys').update({ revoked_at: new Date().toISOString() }).eq('device_key', key); } catch (e) { /* ไม่เป็นไร */ }
   try { localStorage.removeItem('darkchat_device_key'); } catch (e) { /* ไม่เป็นไร */ }
   toast('บัญชีนี้ถูกสั่งออกจากระบบจากอีกเครื่อง', 'error');
+  noteSignOut('ถูกสั่งออกจากระบบจากอีกเครื่อง');
   await logoutNow(uid);
 }
 
@@ -9573,7 +9628,7 @@ function openRecovery() {
 async function cancelRecovery() {
   closeModal('recovery-modal');
   history.replaceState(null, '', cleanAppUrl());
-  try { await sb.auth.signOut(); } catch (e) { /* ไม่เป็นไร */ }
+  try { await sb.auth.signOut({ scope: 'local' }); } catch (e) { /* ไม่เป็นไร */ }
 }
 
 async function finishRecovery() {
@@ -9924,6 +9979,7 @@ async function pinSubmit() {
     const uid = pin.user.id;
     hidePin();
     toast('ใส่ PIN ผิดเกินกำหนด กรุณาเข้าสู่ระบบใหม่ด้วยรหัสผ่าน', 'error');
+    noteSignOut('ใส่ PIN ผิดเกินกำหนด');
     return logoutNow(uid);
   }
   pinError(`PIN ไม่ถูกต้อง (เหลือ ${PIN_MAX_TRIES - pin.tries} ครั้ง)`);
