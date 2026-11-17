@@ -21,6 +21,10 @@
 
   <!-- Supabase JS SDK -->
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script>
+    // เคยเข้าสู่ระบบไว้แล้ว: ซ่อนหน้าเข้าสู่ระบบไว้ก่อน ระหว่างกำลังเปิดบัญชีเดิม (ไม่ให้เด้งไปหน้าใส่อีเมล)
+    try { if (Object.keys(localStorage).some(function (k) { return /^sb-.+-auth-token$/.test(k); })) document.documentElement.classList.add('has-session'); } catch (e) {}
+  </script>
 </head>
 <body data-theme="purple" data-mode="glass">
 
@@ -29,6 +33,11 @@
   <div id="app-container">
 
     <!-- 1. หน้าเข้าสู่ระบบ -->
+    <div id="boot-splash" class="boot-splash" role="status" aria-live="polite">
+      <div class="boot-logo">💬</div>
+      <div class="boot-text" id="boot-text">กำลังเปิด DarkChat…</div>
+      <button type="button" id="boot-retry" class="secondary-btn hidden-element">ลองเชื่อมต่ออีกครั้ง</button>
+    </div>
     <div id="auth-section" class="screen-section">
       <div class="orb orb-1"></div>
       <div class="orb orb-2"></div>
@@ -46,6 +55,7 @@
           <button id="tab-register-btn" type="button" onclick="switchAuthTab('register')">สมัครสมาชิก</button>
         </div>
 
+        <div id="signout-note" class="signout-note hidden-element"></div>
         <form id="login-form" onsubmit="handleLogin(event)">
           <div class="input-group">
             <label for="login-email">อีเมล</label>
