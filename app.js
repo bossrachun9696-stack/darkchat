@@ -2425,7 +2425,7 @@ async function saveNotifyPrefs() {
 // ==================== เฟส D3: ลิงก์ ส่งต่อ ตั้งเวลาลบ เมนูห้อง ค้นหา ธีมห้อง ปักหมุดแชท ====================
 
 // ---------- ลิงก์ที่กดได้ ----------
-const URL_RE = /(https?:\/\/[^\s<>"']+|www\.[^\s<>"']+)/gi;
+const URL_RE = /(https?:\/\/[^\s<>"'“”‘’]+|www\.[^\s<>"'“”‘’]+)/gi;   // ไม่รวมเครื่องหมายคำพูด (รวมแบบโค้ง “ ”) ที่ติดท้ายลิงก์
 
 function linkify(el, text) {
   let last = 0;
@@ -2433,7 +2433,7 @@ function linkify(el, text) {
   URL_RE.lastIndex = 0;
   while ((m = URL_RE.exec(text)) !== null) {
     let url = m[0];
-    const trail = url.match(/[.,;:!?)\]}'"]+$/);
+    const trail = url.match(/[.,;:!?)\]}'"“”‘’»]+$/);
     if (trail) url = url.slice(0, -trail[0].length);
     if (!url) continue;
     el.appendChild(document.createTextNode(text.slice(last, m.index)));
