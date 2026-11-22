@@ -853,11 +853,27 @@
         box.appendChild(el('span', 'hint', 'เวลา (เวลาไทย)'));
         const tin = document.createElement('input'); tin.type = 'time'; tin.className = 'board-input'; tin.value = mine.at_time || '12:00';
         box.appendChild(tin);
+        // เลือกแผงที่จะสรุป (ไม่เลือก = ทุกแผง)
+        const myBoards = info.my_boards || [];
+        let pick = [...(mine.board_ids || [])];
+        if (myBoards.length > 1) {
+          box.appendChild(el('span', 'hint', 'สรุปแผงไหนบ้าง (ไม่เลือก = ทุกแผง)'));
+          const brow = el('div', 'chip-row');
+          const paint = () => brow.querySelectorAll('[data-bid]').forEach(c => c.classList.toggle('primary', c.dataset.bid === '' ? !pick.length : pick.includes(c.dataset.bid)));
+          [{ id: '', name: 'ทุกแผง' }, ...myBoards].forEach(bd => { const c = el('button', 'chip', bd.name); c.type = 'button'; c.dataset.bid = bd.id;
+            c.onclick = () => { if (!bd.id) pick = []; else pick = pick.includes(bd.id) ? pick.filter(x => x !== bd.id) : [...pick, bd.id]; paint(); }; brow.appendChild(c); });
+          paint();
+          box.appendChild(brow);
+        }
         const save = actionBtn('💾 บันทึกวัน-เวลา', async () => {
           dates = din.value.split(/[^0-9]+/).map(Number).filter(n => n >= 1 && n <= 31);
           if (!days.length && !dates.length) return toast('เลือกวันอย่างน้อย 1 วัน', 'error');
           const { error: e } = await sb.rpc('mh_chat_set', { p_room: key, p_enabled: true, p_days: days, p_dates: dates, p_time: tin.value || '12:00' });
           if (e) return extErr(e);
+          if (myBoards.length > 1) {
+            const { error: e2 } = await sb.rpc('mh_chat_set_boards', { p_room: key, p_boards: pick });
+            if (e2) return extErr(e2);
+          }
           toast('บันทึกแล้ว: ' + scheduleText({ days, dates, at_time: tin.value }), 'success');
         }, 'primary-btn');
         save.style.marginTop = '8px';
