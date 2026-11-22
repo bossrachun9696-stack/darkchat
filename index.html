@@ -23,7 +23,7 @@
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
   <script>
     // เคยเข้าสู่ระบบไว้แล้ว: ซ่อนหน้าเข้าสู่ระบบไว้ก่อน ระหว่างกำลังเปิดบัญชีเดิม (ไม่ให้เด้งไปหน้าใส่อีเมล)
-    try { if (Object.keys(localStorage).some(function (k) { return /^sb-.+-auth-token$/.test(k); })) document.documentElement.classList.add('has-session'); } catch (e) {}
+    try { if (localStorage.getItem('sb-ealxfgjuiwoewwxxyppu-auth-token')) document.documentElement.classList.add('has-session'); } catch (e) {}
   </script>
 </head>
 <body data-theme="purple" data-mode="glass">

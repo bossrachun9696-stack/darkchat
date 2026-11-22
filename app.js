@@ -250,7 +250,7 @@ window.addEventListener('DOMContentLoaded', async () => {
 
 // ---------- เปิดแอป: ใช้บัญชีที่เข้าสู่ระบบค้างไว้ (ลองซ้ำถ้าเน็ตยังไม่พร้อม เช่น เพิ่งอัปเดตไฟล์ / เพิ่งปลดล็อกมือถือ) ----------
 let signingOut = false;
-const hasStoredSession = () => { try { return Object.keys(localStorage).some(k => /^sb-.+-auth-token$/.test(k)); } catch (e) { return false; } };
+const hasStoredSession = () => { try { return !!localStorage.getItem('sb-ealxfgjuiwoewwxxyppu-auth-token'); } catch (e) { return false; } };
 function bootDone() {
   document.documentElement.classList.remove('has-session');
   $('boot-splash').classList.add('hidden-element');
