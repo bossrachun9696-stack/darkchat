@@ -923,7 +923,9 @@ async function onIncoming(row, silent) {
     return;
   }
 
-  if (!msg.isMe && msg.kind !== 'system') {
+  // ข้อความอัตโนมัติจากเกมเด็ก / สรุปมหาเฮงตามเวลา: ผู้ส่งคือเราเอง (คนที่เชื่อมห้อง) แต่ต้องเด้งเตือนด้วย
+  const autoExt = msg.kind === 'ext' && row.meta && (row.meta.ext === 'kidgame' || (row.meta.ext === 'board' && row.meta.type === 'summary'));
+  if ((!msg.isMe || autoExt) && msg.kind !== 'system') {
     const mentioned = !!row.group_id && iAmMentioned(msg);
     const quiet = !!silent || dndActive() || (isMuted(partner) && !mentioned);
     if (!quiet) playSound('receive');
