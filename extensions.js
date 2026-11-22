@@ -36,7 +36,11 @@
     ext_not_found: 'ไม่พบส่วนขยายนี้ (อาจถูกปิดไปแล้ว)',
     no_open_request: 'คำขอนี้ถูกจัดการไปแล้ว',
     qr_too_big: 'รูป QR ใหญ่เกินไป',
-    room_not_supported: 'เชื่อมสมุดบ้านได้เฉพาะแชทกลุ่มและแชทสองคน',
+    room_not_supported: 'เชื่อมส่วนขยายกับห้องได้เฉพาะแชทกลุ่มและแชทสองคน',
+    kg_not_parent: 'ต้องเป็นผู้ปกครองในเกมเด็กก่อน: เปิดเกมเด็ก > ผู้ปกครอง > สร้างบ้านเกม',
+    bad_time: 'เวลาไม่ถูกต้อง (เช่น 12:00)',
+    not_owner: 'แก้ได้เฉพาะเจ้าของกระดานที่เชื่อมไว้',
+    ext_locked: 'ยังไม่มีสิทธิ์ใช้ส่วนขยายนี้ (ซื้อหรือทดลองใช้ก่อน)',
     not_in_family: 'คุณไม่ได้เป็นสมาชิกบ้านนี้ในสมุดบ้าน',
     ledger_ext_missing: 'ยังไม่มีส่วนขยายชนิดสมุดบ้าน ให้แอดมินตั้งชนิดในหน้าแก้ไขส่วนขยาย',
     post_failed: 'ส่งข้อความเข้าห้องไม่ได้',
@@ -58,6 +62,9 @@
     const msg = (error && error.message) || '';
     for (const k in ERR) if (msg.includes(k)) return toast(ERR[k], 'error');
     if (/post_failed/.test(msg)) return toast('ส่งข้อความเข้าห้องไม่ได้: ' + msg.replace(/^.*post_failed:\s*/, ''), 'error');
+    if (/kg_chat|mh_chat|ext_games/.test(msg) && /Could not find the function|does not exist/i.test(msg)) {
+      return toast('ยังไม่ได้ติดตั้งส่วนขยายเกม/กระดาน: รันไฟล์ supabase-ext-games.sql ใน SQL Editor ก่อน', 'error');
+    }
     if (/ext_ledger|ext_room_mute/.test(msg) && /Could not find the function|does not exist/i.test(msg)) {
       return toast('ยังไม่ได้ตั้งค่าการเชื่อมสมุดบ้าน: รันไฟล์ supabase-ledger.sql ใน SQL Editor ก่อน', 'error');
     }
@@ -766,6 +773,118 @@
     openModal('ext-pick-modal');
   }
 
+  // ---------- 🎮 เกมเด็ก / 🎯 กระดาน 00–99: เชื่อมกับห้อง ----------
+  const kindExt = k => EXT.list.find(e => e.kind === k && e.active);
+  async function linkKidGame() {
+    const key = EXT.roomKey;
+    if (!key || !/^(g|d):/.test(key)) return toast('เชื่อมได้เฉพาะแชทกลุ่มและแชทสองคน', 'error');
+    const K = kindExt('kidgame');
+    if (K && !K.can_use) return openPaywall(K.id);
+    const ok = await confirmDialog('เชื่อมเกมเด็กกับห้องนี้',
+      'ลูกเล่นจบรอบเมื่อไหร่ จะแจ้งในห้องนี้ทันที พร้อมสรุปคะแนนแยกวิชา (คณิต / ABC / ไทย) และยอดดาวสะสม\nแจ้งเมื่อลูกแลกคูปองรางวัลด้วย\n\nปิดได้ที่ ⋮ > ส่วนขยาย > ตั้งค่าแจ้งเตือนส่วนขยาย', 'เชื่อม');
+    if (!ok) return;
+    const { error } = await sb.rpc('kg_chat_link', { p_room: key });
+    if (error) return extErr(error);
+    toast('เชื่อมเกมเด็กกับห้องนี้แล้ว', 'success');
+    await loadRoom();
+  }
+  async function linkBoard() {
+    const key = EXT.roomKey;
+    if (!key || !/^(g|d):/.test(key)) return toast('เชื่อมได้เฉพาะแชทกลุ่มและแชทสองคน', 'error');
+    const B = kindExt('board');
+    if (B && !B.can_use) return openPaywall(B.id);
+    const ok = await confirmDialog('เชื่อมกระดาน 00–99 กับห้องนี้',
+      'จะส่งสรุปงวดที่เปิดอยู่ (งวดที่เท่าไหร่ วันที่ เลขที่ซื้อแล้ว เลขที่ยังว่าง ยอดเงิน) เข้าห้องนี้\nค่าเริ่มต้น: ทุกวันที่ 1 และ 16 เวลา 12:00 เปลี่ยนวัน-เวลาเองได้หลังเชื่อม', 'เชื่อม');
+    if (!ok) return;
+    const { error } = await sb.rpc('mh_chat_link', { p_room: key });
+    if (error) return extErr(error);
+    toast('เชื่อมกระดานกับห้องนี้แล้ว', 'success');
+    await loadRoom();
+    openExtNotify();
+  }
+  const WDAY = ['อา', 'จ', 'อ', 'พ', 'พฤ', 'ศ', 'ส'];
+  async function renderGameLinks(body, key) {
+    const { data, error } = await sb.rpc('ext_games_room_info', { p_room: key });
+    if (error) { if (kindExt('kidgame') || kindExt('board')) console.warn(error); return; }
+    const info = data || { kid: [], board: [] };
+    const roomOk = /^(g|d):/.test(key);
+    // 🎮 เกมเด็ก
+    if (kindExt('kidgame') || info.kid.length) {
+      body.appendChild(el('div', 'list-title', '🎮 เกมเด็ก'));
+      if (!info.kid.length && roomOk) body.appendChild(actionBtn('🎮 เชื่อมเกมเด็กกับห้องนี้', () => { closeM('ext-notify-modal'); linkKidGame(); }, 'secondary-btn'));
+      info.kid.forEach(l => {
+        body.appendChild(el('div', 'hint', 'บ้านเกม · ' + l.name));
+        const set = (f, v) => sb.rpc('kg_chat_set', { p_room: key, p_family: l.family_id, p_rounds: f === 'r' ? v : null, p_redeem: f === 'd' ? v : null })
+          .then(({ error: e }) => { if (e) { extErr(e); return false; } return true; });
+        body.appendChild(switchRow('แจ้งเมื่อลูกเล่นจบรอบ', 'ส่งทันที พร้อมสรุปคะแนนแต่ละวิชาและดาวสะสม', l.notify_rounds, v => set('r', v)));
+        body.appendChild(switchRow('แจ้งเมื่อลูกแลกรางวัล', 'คูปองที่รอผู้ปกครองให้', l.notify_redeem, v => set('d', v)));
+        const un = actionBtn('ยกเลิกการเชื่อมเกมเด็ก', async () => {
+          if (!await confirmDialog('ยกเลิกการเชื่อม', `ห้องนี้จะไม่ได้รับแจ้งเตือนจากบ้านเกม "${l.name}" อีก`, 'ยกเลิกการเชื่อม', true)) return;
+          const { error: e } = await sb.rpc('kg_chat_unlink', { p_room: key, p_family: l.family_id });
+          if (e) return extErr(e);
+          toast('ยกเลิกการเชื่อมแล้ว', 'info'); openExtNotify();
+        }, 'secondary-btn danger');
+        un.style.marginTop = '6px';
+        body.appendChild(un);
+      });
+    }
+    // 🎯 กระดาน 00–99
+    if (kindExt('board') || info.board.length) {
+      body.appendChild(el('div', 'list-title', '🎯 กระดาน 00–99'));
+      const mine = info.board.find(b => b.mine);
+      if (!mine && roomOk) body.appendChild(actionBtn('🎯 เชื่อมกระดานของฉันกับห้องนี้', () => { closeM('ext-notify-modal'); linkBoard(); }, 'secondary-btn'));
+      info.board.filter(b => !b.mine).forEach(b => body.appendChild(el('div', 'hint',
+        `กระดานของ ${b.owner_email || 'สมาชิก'} · ${b.enabled ? 'ส่งสรุป' : 'ปิดอยู่'} ${scheduleText(b)}`)));
+      if (mine) {
+        let days = [...(mine.days || [])], dates = [...(mine.dates || [])];
+        body.appendChild(switchRow('ส่งสรุปงวดตามเวลาที่ตั้ง', 'เลขที่ซื้อแล้ว / เลขที่ยังว่าง / ยอดเงิน ของงวดที่เปิดอยู่', mine.enabled, async v => {
+          const { error: e } = await sb.rpc('mh_chat_set', { p_room: key, p_enabled: v, p_days: null, p_dates: null, p_time: null });
+          if (e) { extErr(e); return false; } return true;
+        }));
+        const box = el('div', 'board-sched');
+        box.appendChild(el('span', 'hint', 'ส่งทุกวัน (ในสัปดาห์)'));
+        const wrow = el('div', 'chip-row');
+        WDAY.forEach((w, i) => { const c = el('button', 'chip' + (days.includes(i) ? ' primary' : ''), w); c.type = 'button';
+          c.onclick = () => { days = days.includes(i) ? days.filter(x => x !== i) : [...days, i]; c.classList.toggle('primary'); }; wrow.appendChild(c); });
+        box.appendChild(wrow);
+        box.appendChild(el('span', 'hint', 'และ/หรือ ทุกวันที่ของเดือน (คั่นด้วยจุลภาค เช่น 1,16)'));
+        const din = document.createElement('input'); din.className = 'board-input'; din.inputMode = 'numeric'; din.placeholder = '1,16'; din.value = dates.join(',');
+        box.appendChild(din);
+        box.appendChild(el('span', 'hint', 'เวลา (เวลาไทย)'));
+        const tin = document.createElement('input'); tin.type = 'time'; tin.className = 'board-input'; tin.value = mine.at_time || '12:00';
+        box.appendChild(tin);
+        const save = actionBtn('💾 บันทึกวัน-เวลา', async () => {
+          dates = din.value.split(/[^0-9]+/).map(Number).filter(n => n >= 1 && n <= 31);
+          if (!days.length && !dates.length) return toast('เลือกวันอย่างน้อย 1 วัน', 'error');
+          const { error: e } = await sb.rpc('mh_chat_set', { p_room: key, p_enabled: true, p_days: days, p_dates: dates, p_time: tin.value || '12:00' });
+          if (e) return extErr(e);
+          toast('บันทึกแล้ว: ' + scheduleText({ days, dates, at_time: tin.value }), 'success');
+        }, 'primary-btn');
+        save.style.marginTop = '8px';
+        box.appendChild(save);
+        body.appendChild(box);
+        body.appendChild(actionBtn('📤 ส่งสรุปงวดตอนนี้', async () => {
+          const { error: e } = await sb.rpc('mh_chat_send_now', { p_room: key });
+          if (e) return extErr(e);
+          toast('ส่งสรุปเข้าห้องแล้ว', 'success'); closeM('ext-notify-modal');
+        }, 'secondary-btn'));
+        const un = actionBtn('ยกเลิกการเชื่อมกระดาน', async () => {
+          if (!await confirmDialog('ยกเลิกการเชื่อม', 'ห้องนี้จะไม่ได้รับสรุปกระดานของคุณอีก', 'ยกเลิกการเชื่อม', true)) return;
+          const { error: e } = await sb.rpc('mh_chat_unlink', { p_room: key });
+          if (e) return extErr(e);
+          toast('ยกเลิกการเชื่อมแล้ว', 'info'); openExtNotify();
+        }, 'secondary-btn danger');
+        un.style.marginTop = '6px';
+        body.appendChild(un);
+      }
+    }
+  }
+  function scheduleText(b) {
+    const d = (b.days || []).slice().sort().map(i => WDAY[i]).join(' ');
+    const n = (b.dates || []).slice().sort((x, y) => x - y).join(', ');
+    return [d && 'ทุกวัน ' + d, n && 'ทุกวันที่ ' + n].filter(Boolean).join(' และ ') + (b.at_time ? ' เวลา ' + String(b.at_time).slice(0, 5) : '');
+  }
+
   function switchRow(title, hint, checked, onChange) {
     const row = el('div', 'set-row');
     const t = el('div');
@@ -801,7 +920,8 @@
       toast(v ? 'ปิดการแจ้งเตือนส่วนขยายของห้องนี้แล้ว' : 'เปิดการแจ้งเตือนส่วนขยายแล้ว', 'success');
       return true;
     }));
-    if (!info.links.length) {
+    if (!info.links.length && ledgerExt()) {
+      body.appendChild(el('div', 'list-title', '🏠 สมุดบ้าน'));
       body.appendChild(el('div', 'hint', 'ห้องนี้ยังไม่ได้เชื่อมกับสมุดบ้าน'));
       if (!/^(g|d):/.test(key)) body.appendChild(el('div', 'hint', 'เชื่อมสมุดบ้านได้เฉพาะแชทกลุ่มและแชทสองคน'));
       else if (ledgerExt()) body.appendChild(actionBtn('🏠 เชื่อมสมุดบ้านกับห้องนี้', () => { closeM('ext-notify-modal'); linkLedger(); }, 'secondary-btn'));
@@ -828,6 +948,7 @@
       un.style.marginTop = '8px';
       body.appendChild(un);
     });
+    try { await renderGameLinks(body, key); } catch (x) { console.warn(x); }
     const close = actionBtn('ปิด', () => closeM('ext-notify-modal'), 'primary-btn');
     close.style.marginTop = '16px';
     body.appendChild(close);
@@ -955,16 +1076,17 @@
       const card = el('div', 'ext-msg ext-msg-' + (meta.type || 'info'));
       card.dataset.id = m.id;
       const head = el('div', 'ext-msg-head');
-      const L = ledgerExt();
-      head.appendChild(iconNode(L || { icon: '🏠' }, 'ext-mini-icon'));
-      head.appendChild(el('strong', '', meta.ext === 'ledger' ? 'สมุดบ้าน' : 'ส่วนขยาย'));
+      const KIND = { ledger: ['ledger', '🏠', 'สมุดบ้าน', 'เปิดสมุดบ้าน'], kidgame: ['kidgame', '🎮', 'เกมเด็ก', 'เปิดเกม'], board: ['board', '🎯', 'กระดาน 00–99', 'เปิดกระดาน'] }[meta.ext];
+      const L = KIND ? kindExt(KIND[0]) : null;
+      head.appendChild(iconNode(L || { icon: KIND ? KIND[1] : '🧩' }, 'ext-mini-icon'));
+      head.appendChild(el('strong', '', KIND ? (L?.name || KIND[2]) : 'ส่วนขยาย'));
       const tm = el('span', 'ext-msg-time', typeof fmtClock === 'function' ? fmtClock(m.ts) : '');
       head.appendChild(tm);
       card.appendChild(head);
       card.appendChild(el('div', 'ext-msg-body', String(m.text || '').replace(/^(🏠|📌) สมุดบ้าน: /, '$1 ')));
-      if (meta.ext === 'ledger' && L && L.can_use) {
+      if (KIND && L && L.can_use) {
         const a = el('div', 'ext-msg-acts');
-        const o = chip2('เปิดสมุดบ้าน', () => launch(L.id));
+        const o = chip2(KIND[3], () => launch(L.id));
         o.className = 'chip primary';
         a.appendChild(o);
         card.appendChild(a);
@@ -1088,14 +1210,22 @@
     let kind = (e && e.kind) || 'link';
     const kseg = el('div', 'segmented');
     const kLink = el('button', '', '🔗 ลิงก์ทั่วไป');
-    const kLedger = el('button', '', '🏠 สมุดบ้าน (เชื่อมข้อมูล)');
-    [kLink, kLedger].forEach(b => { b.type = 'button'; });
-    kseg.append(kLink, kLedger);
+    const kLedger = el('button', '', '🏠 สมุดบ้าน');
+    const kKid = el('button', '', '🎮 เกมเด็ก');
+    const kBoard = el('button', '', '🎯 กระดาน 00–99');
+    [kLink, kLedger, kKid, kBoard].forEach(b => { b.type = 'button'; });
+    kseg.append(kLink, kLedger, kKid, kBoard);
+    kseg.classList.add('kind-seg');
     const kHint = el('span', 'hint', '');
-    const setKind = v => { kind = v; kLink.classList.toggle('active', v === 'link'); kLedger.classList.toggle('active', v === 'ledger');
-      kHint.textContent = v === 'ledger' ? 'ห้องที่เพิ่มส่วนขยายนี้ เชื่อมกับบ้านในสมุดบ้านได้: แจ้งเตือนเมื่อแก้ไข สรุป 20:00 และเตือนบิล' : 'กดไอคอนแล้วเปิดลิงก์'; };
+    const KH = { link: 'กดไอคอนแล้วเปิดลิงก์', ledger: 'ห้องที่เพิ่มส่วนขยายนี้ เชื่อมกับบ้านในสมุดบ้านได้: แจ้งเตือนเมื่อแก้ไข สรุป 20:00 และเตือนบิล',
+      kidgame: 'เกมเด็ก: ไม่มีสิทธิ์ = เข้าเกมไม่ได้ (ลูกใช้สิทธิ์ของผู้ปกครอง) · เชื่อมห้องแล้วแจ้งผลทุกครั้งที่ลูกเล่นจบรอบ',
+      board: 'กระดาน 00–99 (มหาเฮง): ไม่มีสิทธิ์ = ใช้กระดานไม่ได้ · เชื่อมห้องแล้วส่งสรุปงวดตามวัน-เวลาที่ตั้ง' };
+    const setKind = v => { kind = v; [[kLink, 'link'], [kLedger, 'ledger'], [kKid, 'kidgame'], [kBoard, 'board']].forEach(([b, k]) => b.classList.toggle('active', v === k));
+      kHint.textContent = KH[v] || ''; };
     kLink.onclick = () => setKind('link');
     kLedger.onclick = () => setKind('ledger');
+    kKid.onclick = () => setKind('kidgame');
+    kBoard.onclick = () => setKind('board');
     setKind(kind);
     body.append(el('div', 'list-title', 'ชนิดส่วนขยาย'), kseg, kHint);
 
@@ -1173,6 +1303,7 @@
     if (!error && kind) {
       const { error: kErr } = await sb.rpc('ext_admin_set_kind', { p_id: newId || editId, p_kind: kind });
       if (kErr && kind === 'ledger') toast('บันทึกแล้ว แต่ตั้งชนิดสมุดบ้านไม่ได้: รัน supabase-ledger.sql ก่อน', 'error');
+      else if (kErr && kind !== 'link') toast('บันทึกแล้ว แต่ตั้งชนิดไม่ได้: รัน supabase-ext-games.sql ก่อน', 'error');
     }
     if (!error) {
       const fp = parseInt(($('ext-f-fprice') || {}).value, 10);
@@ -2161,6 +2292,9 @@
     if (inRoom.length) go(`จัดการส่วนขยายในห้อง (${inRoom.length})`, openRoomExtSheet);
     const L = ledgerExt();
     if (L && EXT.roomKey && /^(g|d):/.test(EXT.roomKey)) go(L.can_use ? '🏠 เชื่อมสมุดบ้านกับห้องนี้' : '🔒 เชื่อมสมุดบ้านกับห้องนี้ (ต้องซื้อหรือทดลองใช้)', linkLedger);
+    const KG = kindExt('kidgame'), BD = kindExt('board');
+    if (KG && EXT.roomKey && /^(g|d):/.test(EXT.roomKey)) go(KG.can_use ? '🎮 เชื่อมเกมเด็กกับห้องนี้' : '🔒 เชื่อมเกมเด็กกับห้องนี้ (ต้องซื้อหรือทดลองใช้)', linkKidGame);
+    if (BD && EXT.roomKey && /^(g|d):/.test(EXT.roomKey)) go(BD.can_use ? '🎯 เชื่อมกระดาน 00–99 กับห้องนี้' : '🔒 เชื่อมกระดาน 00–99 กับห้องนี้ (ต้องซื้อหรือทดลองใช้)', linkBoard);
     go('🔔 ตั้งค่าแจ้งเตือนส่วนขยาย', openExtNotify);
     go(usable.length ? '🛒 ร้านส่วนขยาย (ซื้อเพิ่ม)' : '🛒 ร้านส่วนขยาย', () => openExtStore());
     det.appendChild(body);
