@@ -1,4 +1,4 @@
-const CACHE_NAME = 'darkchat-cache-v8';
+const CACHE_NAME = 'darkchat-cache-v9';
 const META_CACHE = 'darkchat-meta'; // เก็บเลขข้อความที่ยังไม่ได้อ่าน (ใช้กับป้ายบนไอคอน)
 const ASSETS = [
   './',

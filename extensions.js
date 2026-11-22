@@ -517,7 +517,7 @@
     rows.forEach(e => list.appendChild(extCard(e)));
     body.appendChild(list);
 
-    if (isAdmin()) { body.appendChild(adminBlock()); body.appendChild(adminPriceBlock()); body.appendChild(adminPayBlock()); }
+    if (isAdmin()) { body.appendChild(adminBlock()); body.appendChild(adminPriceBlock()); body.appendChild(adminPayBlock()); if (EXT.list.some(e => e.kind === 'board')) body.appendChild(adminAnnounceBlock()); }
     else if (EXT.famReady) {
       const fb = el('div', 'fam-store-bar');
       fb.appendChild(el('span', '', myFam() ? `👨‍👩‍👧 ครอบครัว "${myFam().name}" · ${(EXT.fam.members || []).length}/${FAM_MAX} คน` : '👨‍👩‍👧 ซื้อแบบครอบครัวได้ เมื่อสร้างหรือเข้าร่วมครอบครัว'));
@@ -1397,6 +1397,105 @@
     row.appendChild(save);
     box.append(ta, prev, file, row);
     return box;
+  }
+
+  // ---------- 📢 ประกาศในแอปมหาเฮง (แทน Google Sheets) ----------
+  function adminAnnounceBlock() {
+    const box = el('div', 'ext-admin');
+    box.appendChild(el('div', 'list-title', '📢 ประกาศในแอปมหาเฮง'));
+    box.appendChild(el('div', 'hint', 'ลูกค้ามหาเฮงทุกคนเห็นทันทีที่กระดิ่ง 🔔 · ข้อความที่ลูกค้าทักแอดมินจะเข้าแชทส่วนตัวที่นี่ ขึ้นต้นด้วย 🎯 [มหาเฮง]'));
+    const list = el('div', 'ann-admin-list');
+    const load = async () => {
+      list.innerHTML = '';
+      const { data, error } = await sb.from('mh_announcements').select('*').order('created_at', { ascending: false }).limit(30);
+      if (error) { list.appendChild(el('div', 'hint', /mh_announcements|does not exist|schema cache/i.test(error.message || '') ? 'ยังไม่ได้รัน supabase-mh-v3.sql' : error.message)); return; }
+      if (!data.length) list.appendChild(el('div', 'hint', 'ยังไม่มีประกาศ'));
+      data.forEach(a => {
+        const card = el('div', 'req-card');
+        card.appendChild(el('strong', '', (a.is_new ? '🆕 ' : '') + a.title));
+        card.appendChild(el('div', 'hint', `${fmtDate(a.created_at)}${(a.images || []).length ? ` · รูป ${a.images.length}` : ''}`));
+        const acts = el('div', 'req-actions');
+        acts.appendChild(chip2('✏️ แก้ไข', () => openAnnEditor(a, load)));
+        acts.appendChild(chip2(a.is_new ? 'ย้ายไปประกาศเก่า' : 'ตั้งเป็นประกาศใหม่', async () => {
+          const { error: e } = await sb.from('mh_announcements').update({ is_new: !a.is_new }).eq('id', a.id);
+          if (e) return extErr(e); load();
+        }));
+        const del = chip2('ลบ', async () => {
+          if (!(await confirmDialog('ลบประกาศ', `ลบ "${a.title}"?`, 'ลบ', true))) return;
+          const { error: e } = await sb.from('mh_announcements').delete().eq('id', a.id);
+          if (e) return extErr(e);
+          const paths = (a.images || []).map(u => decodeURIComponent((u.split('/mh-announce/')[1] || '').split('?')[0])).filter(Boolean);
+          if (paths.length) sb.storage.from('mh-announce').remove(paths).then(() => {}, () => {});
+          load();
+        });
+        del.classList.add('danger');
+        acts.appendChild(del);
+        card.appendChild(acts);
+        list.appendChild(card);
+      });
+    };
+    const add = chip2('➕ เขียนประกาศใหม่', () => openAnnEditor(null, load));
+    add.className = 'chip primary';
+    box.append(add, list);
+    load();
+    return box;
+  }
+  function openAnnEditor(a, done) {
+    ensureModal('ann-modal', 'confirm-box rec-box');
+    const body = $('ann-modal-body');
+    body.innerHTML = '';
+    body.appendChild(el('h3', '', a ? '✏️ แก้ไขประกาศ' : '📢 ประกาศใหม่ (มหาเฮง)'));
+    const t = document.createElement('input'); t.className = 'board-input'; t.maxLength = 120; t.placeholder = 'หัวข้อ'; t.value = a ? a.title : '';
+    const d = document.createElement('textarea'); d.className = 'plain-input'; d.rows = 6; d.maxLength = 4000; d.placeholder = 'รายละเอียด'; d.value = a ? a.detail : '';
+    let imgs = a ? [...(a.images || [])] : [];
+    const prev = el('div', 'ann-imgs');
+    const paint = () => {
+      prev.innerHTML = '';
+      imgs.forEach((u, i) => {
+        const w = el('div', 'ann-img-w'); const im = document.createElement('img'); im.src = u;
+        const x = el('button', 'ann-img-x', '✕'); x.type = 'button'; x.onclick = () => { imgs.splice(i, 1); paint(); };
+        w.append(im, x); prev.appendChild(w);
+      });
+    };
+    paint();
+    const file = document.createElement('input'); file.type = 'file'; file.accept = 'image/*'; file.multiple = true; file.hidden = true;
+    file.onchange = async () => {
+      const fs = [...(file.files || [])].slice(0, 4 - imgs.length); file.value = '';
+      for (const f of fs) {
+        try {
+          const blob = await new Promise((res, rej) => {
+            const url = URL.createObjectURL(f), img = new Image();
+            img.onload = () => { const r = Math.min(1, 1280 / Math.max(img.width, img.height)); const c = document.createElement('canvas');
+              c.width = Math.round(img.width * r); c.height = Math.round(img.height * r); const x = c.getContext('2d'); x.fillStyle = '#fff'; x.fillRect(0, 0, c.width, c.height);
+              x.drawImage(img, 0, 0, c.width, c.height); URL.revokeObjectURL(url); c.toBlob(res, 'image/jpeg', 0.85); };
+            img.onerror = () => { URL.revokeObjectURL(url); rej(new Error('เปิดรูปไม่ได้')); };
+            img.src = url;
+          });
+          const path = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}.jpg`;
+          const up = await sb.storage.from('mh-announce').upload(path, blob, { contentType: 'image/jpeg', cacheControl: '31536000' });
+          if (up.error) throw up.error;
+          imgs.push(sb.storage.from('mh-announce').getPublicUrl(path).data.publicUrl);
+          paint();
+        } catch (e) { toast('อัปโหลดรูปไม่สำเร็จ: ' + (e.message || e), 'error'); }
+      }
+    };
+    const isNew = document.createElement('label'); isNew.className = 'hint'; const cb = document.createElement('input'); cb.type = 'checkbox'; cb.checked = a ? a.is_new : true;
+    isNew.append(cb, document.createTextNode(' แสดงเป็น "ประกาศใหม่" (ลูกค้าเห็นป้ายแดง)'));
+    const row = el('div', 'ext-acts');
+    row.appendChild(chip2('🖼 เพิ่มรูป (สูงสุด 4)', () => { if (imgs.length >= 4) return toast('ใส่รูปได้สูงสุด 4 รูป', 'error'); file.click(); }));
+    const save = chip2('💾 บันทึกประกาศ', async () => {
+      const title = t.value.trim();
+      if (!title) return toast('ใส่หัวข้อประกาศ', 'error');
+      const row2 = { title, detail: d.value.trim(), images: imgs, is_new: cb.checked };
+      const { error } = a ? await sb.from('mh_announcements').update(row2).eq('id', a.id) : await sb.from('mh_announcements').insert(row2);
+      if (error) return extErr(error);
+      closeM('ann-modal'); toast(a ? 'แก้ไขประกาศแล้ว' : 'ประกาศแล้ว ลูกค้าเห็นทันที', 'success'); done && done();
+    });
+    save.className = 'chip primary';
+    row.appendChild(save);
+    body.append(t, d, isNew, prev, file, row, actionBtn('ยกเลิก', () => closeM('ann-modal')));
+    openModal('ann-modal');
+    setTimeout(() => t.focus(), 60);
   }
 
   function adminBlock() {
