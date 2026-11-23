@@ -7,11 +7,24 @@
   <title>DarkChat</title>
   <link rel="icon" href="icon.svg" type="image/svg+xml">
   <link rel="icon" href="favicon-32.png" type="image/png" sizes="32x32">
-  <link rel="apple-touch-icon" href="apple-touch-icon.png?v=2" sizes="180x180">
+  <link rel="apple-touch-icon" href="apple-touch-icon.png?v=4" sizes="180x180">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-title" content="DarkChat">
   <link rel="manifest" href="manifest.json">
+  <script>
+  // ไอคอนที่ 2 (หยดน้ำ): เปิดลิงก์ ...?app=rain แล้วเพิ่มไปหน้าจอโฮม จะได้ไอคอน/ชื่อชุดหยดน้ำ
+  (function () { try {
+    if (!/[?&]app=rain\b/.test(location.search)) return;
+    var q = function (s) { return document.querySelector(s); }, T = 'ฝนฟ้า';
+    window.__appTitle = T; document.title = T;
+    q('link[rel="manifest"]').href = 'manifest-rain.json';
+    q('link[rel="apple-touch-icon"]').href = 'rain-apple-touch.png?v=1';
+    q('meta[name="apple-mobile-web-app-title"]').content = T;
+    q('link[rel="icon"][type="image/svg+xml"]').href = 'rain.svg';
+    q('link[rel="icon"][type="image/png"]').href = 'rain-32.png';
+  } catch (e) {} })();
+  </script>
 
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>

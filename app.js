@@ -1070,7 +1070,8 @@ function updateBadges() {
       if (!activeChat || activeChat.id !== id) others += n;
     });
   }
-  document.title = total > 0 ? `(${total > 99 ? '99+' : total}) DarkChat` : 'DarkChat';
+  const appT = window.__appTitle || 'DarkChat';
+  document.title = total > 0 ? `(${total > 99 ? '99+' : total}) ${appT}` : appT;
 
   if (total !== lastBadgeTotal) {
     lastBadgeTotal = total;

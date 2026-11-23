@@ -1,0 +1,18 @@
+{
+  "name": "ฝนฟ้า",
+  "short_name": "ฝนฟ้า",
+  "description": "ฝนฟ้า",
+  "lang": "th",
+  "start_url": "./index.html?app=rain",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#1c56b8",
+  "theme_color": "#1c56b8",
+  "icons": [
+    { "src": "rain-192.png", "type": "image/png", "sizes": "192x192", "purpose": "any" },
+    { "src": "rain-512.png", "type": "image/png", "sizes": "512x512", "purpose": "any" },
+    { "src": "rain-maskable-512.png", "type": "image/png", "sizes": "512x512", "purpose": "maskable" },
+    { "src": "rain.svg", "type": "image/svg+xml", "sizes": "any", "purpose": "any" }
+  ],
+  "id": "./?app=rain"
+}
