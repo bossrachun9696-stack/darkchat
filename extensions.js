@@ -802,6 +802,71 @@
     await loadRoom();
     openExtNotify();
   }
+  // ---------- 🍽️ SmartTable: เชื่อมร้านกับห้อง / ตั้งค่าแจ้งเตือน ----------
+  async function linkSmartTable() {
+    const key = EXT.roomKey;
+    if (!key || !/^(g|d):/.test(key)) return toast('เชื่อมได้เฉพาะแชทกลุ่มและแชทสองคน', 'error');
+    const S = kindExt('smarttable');
+    const { data, error } = await sb.rpc('st_chat_my_shops');
+    if (error) return extErr(error);
+    if (!data || !data.length) return toast('ยังไม่มีร้านที่คุณเป็นเจ้าของ/ผู้จัดการใน SmartTable: เปิด SmartTable แล้วสร้างร้านก่อน (ใช้อีเมลเดียวกับ DarkChat)', 'error');
+    const pick = async s => {
+      const ok = await confirmDialog('เชื่อม SmartTable กับห้องนี้',
+        `เชื่อมร้าน "${s.name}" กับห้องนี้?\n\nทุกคนในห้องจะเห็น:\n• ออร์เดอร์ใหม่ (โต๊ะไหน สั่งอะไร)\n• เรียกพนักงาน / ขอเช็กบิล / แนบสลิป\n• ออร์เดอร์กลับบ้าน และคิวพร้อมรับ\n• สรุปยอดตอนปิดร้าน\n\nเลือกเปิด/ปิดแต่ละอย่างได้หลังเชื่อม`, 'เชื่อม');
+      if (!ok) return;
+      const { error: e2 } = await sb.rpc('st_chat_link', { p_room: key, p_shop: s.id });
+      if (e2) return /st_ext_locked/.test(e2.message || '') && S ? openPaywall(S.id) : extErr(e2);
+      toast('เชื่อมร้านกับห้องนี้แล้ว', 'success');
+      await loadRoom();
+      openExtNotify();
+    };
+    if (data.length === 1) return pick(data[0]);
+    ensureModal('ext-pick-modal', 'confirm-box');
+    const body = $('ext-pick-modal-body');
+    body.innerHTML = '';
+    body.appendChild(el('h3', '', 'เลือกร้านที่จะเชื่อม'));
+    const st = el('div', 'stack');
+    data.forEach(s => st.appendChild(actionBtn('🍽️ ' + s.name, () => { closeM('ext-pick-modal'); pick(s); })));
+    st.appendChild(actionBtn('ยกเลิก', () => closeM('ext-pick-modal')));
+    body.appendChild(st);
+    openModal('ext-pick-modal');
+  }
+  async function renderStLinks(body, key) {
+    const { data, error } = await sb.rpc('st_chat_room_info', { p_room: key });
+    if (error) return;   // ยังไม่ได้ติดตั้ง st-27
+    const info = data || { links: [], my_shops: [] };
+    if (!kindExt('smarttable') && !info.links.length && !info.my_shops.length) return;
+    body.appendChild(el('div', 'list-title', '🍽️ SmartTable (ร้านอาหาร)'));
+    const linked = new Set(info.links.map(l => l.shop_id));
+    if (/^(g|d):/.test(key) && info.my_shops.some(s => !linked.has(s.id))) {
+      body.appendChild(actionBtn('🍽️ เชื่อมร้านของฉันกับห้องนี้', () => { closeM('ext-notify-modal'); linkSmartTable(); }, 'secondary-btn'));
+    }
+    const EV = [['orders', 'ออร์เดอร์ใหม่', 'โต๊ะไหน สั่งอะไร หมายเหตุ ยอดรวม'], ['open', 'เปิดโต๊ะ', 'มีคนมาเปิดโต๊ะ / สแกนเปิดเอง'],
+      ['call', 'เรียกพนักงาน', 'รวมขอยืนยันโต๊ะ และใส่คูปอง'], ['bill', 'ขอเช็กบิล / แนบสลิป', ''],
+      ['queue', 'ออร์เดอร์กลับบ้าน / คิว', 'ออร์เดอร์ใหม่ และแจ้งเมื่อคิวพร้อมรับ'], ['summary', 'สรุปยอดตอนปิดร้าน', 'ยอดขาย ช่องทางจ่าย เมนูขายดี']];
+    info.links.forEach(l => {
+      body.appendChild(el('div', 'hint', `ร้าน ${l.name} · ${l.is_open ? '🟢 เปิดอยู่' : '🔴 ปิดอยู่'}`));
+      if (!l.can) return;
+      EV.forEach(([k, t, h]) => body.appendChild(switchRow(t, h, l[k], async v => {
+        const { error: e } = await sb.rpc('st_chat_set', { p_room: key, p_shop: l.shop_id, p_events: { [k]: v } });
+        if (e) { extErr(e); return false; } return true;
+      })));
+      body.appendChild(actionBtn('📊 ส่งสรุปยอดวันนี้ตอนนี้', async () => {
+        const { error: e } = await sb.rpc('st_chat_send_summary', { p_room: key, p_shop: l.shop_id });
+        if (e) return extErr(e);
+        toast('ส่งสรุปเข้าห้องแล้ว', 'success'); closeM('ext-notify-modal');
+      }, 'secondary-btn'));
+      const un = actionBtn('ยกเลิกการเชื่อมร้านนี้', async () => {
+        if (!await confirmDialog('ยกเลิกการเชื่อม', `ห้องนี้จะไม่ได้รับแจ้งเตือนจากร้าน "${l.name}" อีก`, 'ยกเลิกการเชื่อม', true)) return;
+        const { error: e } = await sb.rpc('st_chat_unlink', { p_room: key, p_shop: l.shop_id });
+        if (e) return extErr(e);
+        toast('ยกเลิกการเชื่อมแล้ว', 'info'); openExtNotify();
+      }, 'secondary-btn danger');
+      un.style.marginTop = '6px';
+      body.appendChild(un);
+    });
+  }
+
   const WDAY = ['อา', 'จ', 'อ', 'พ', 'พฤ', 'ศ', 'ส'];
   async function renderGameLinks(body, key) {
     const { data, error } = await sb.rpc('ext_games_room_info', { p_room: key });
@@ -965,6 +1030,7 @@
       body.appendChild(un);
     });
     try { await renderGameLinks(body, key); } catch (x) { console.warn(x); }
+    try { await renderStLinks(body, key); } catch (x) { console.warn(x); }
     const close = actionBtn('ปิด', () => closeM('ext-notify-modal'), 'primary-btn');
     close.style.marginTop = '16px';
     body.appendChild(close);
@@ -1092,7 +1158,7 @@
       const card = el('div', 'ext-msg ext-msg-' + (meta.type || 'info'));
       card.dataset.id = m.id;
       const head = el('div', 'ext-msg-head');
-      const KIND = { ledger: ['ledger', '🏠', 'สมุดบ้าน', 'เปิดสมุดบ้าน'], kidgame: ['kidgame', '🎮', 'เกมเด็ก', 'เปิดเกม'], board: ['board', '🎯', 'กระดาน 00–99', 'เปิดกระดาน'] }[meta.ext];
+      const KIND = { ledger: ['ledger', '🏠', 'สมุดบ้าน', 'เปิดสมุดบ้าน'], kidgame: ['kidgame', '🎮', 'เกมเด็ก', 'เปิดเกม'], board: ['board', '🎯', 'กระดาน 00–99', 'เปิดกระดาน'], smarttable: ['smarttable', '🍽️', 'SmartTable', 'เปิดร้าน'] }[meta.ext];
       const L = KIND ? kindExt(KIND[0]) : null;
       head.appendChild(iconNode(L || { icon: KIND ? KIND[1] : '🧩' }, 'ext-mini-icon'));
       head.appendChild(el('strong', '', KIND ? (L?.name || KIND[2]) : 'ส่วนขยาย'));
@@ -2628,6 +2694,8 @@
     const KG = kindExt('kidgame'), BD = kindExt('board');
     if (KG && EXT.roomKey && /^(g|d):/.test(EXT.roomKey)) go(KG.can_use ? '🎮 เชื่อมเกมเด็กกับห้องนี้' : '🔒 เชื่อมเกมเด็กกับห้องนี้ (ต้องซื้อหรือทดลองใช้)', linkKidGame);
     if (BD && EXT.roomKey && /^(g|d):/.test(EXT.roomKey)) go(BD.can_use ? '🎯 เชื่อมกระดาน 00–99 กับห้องนี้' : '🔒 เชื่อมกระดาน 00–99 กับห้องนี้ (ต้องซื้อหรือทดลองใช้)', linkBoard);
+    const STX = kindExt('smarttable');
+    if (STX && EXT.roomKey && /^(g|d):/.test(EXT.roomKey)) go('🍽️ เชื่อม SmartTable (ร้านอาหาร) กับห้องนี้', linkSmartTable);
     go('🔔 ตั้งค่าแจ้งเตือนส่วนขยาย', openExtNotify);
     go(usable.length ? '🛒 ร้านส่วนขยาย (ซื้อเพิ่ม)' : '🛒 ร้านส่วนขยาย', () => openExtStore());
     det.appendChild(body);
