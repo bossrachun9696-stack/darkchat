@@ -165,13 +165,15 @@
     if (!items.length || !EXT.roomKey) { box.classList.add('hidden-element'); return; }
     box.classList.remove('hidden-element');
     items.slice(0, maxIcons()).forEach(e => {
-      const b = el('button', 'icon-btn ext-ico' + (e.can_use ? '' : ' locked'));
+      const stk = e.kind === 'smarttable';   // ลูกค้าในห้องไม่ต้องมีสิทธิ์: กดแล้วเปิดสั่งด่วน
+      const b = el('button', 'icon-btn ext-ico' + (e.can_use || stk ? '' : ' locked'));
       b.type = 'button';
       b.title = e.name + (e.can_use ? '' : ' (ต้องซื้อหรือทดลองใช้)');
       b.setAttribute('aria-label', 'ส่วนขยาย ' + e.name);
       b.appendChild(iconNode(e));
-      if (!e.can_use) b.appendChild(el('span', 'ext-lock', '🔒'));
-      b.onclick = () => launch(e.id);
+      if (!e.can_use && !stk) b.appendChild(el('span', 'ext-lock', '🔒'));
+      b.onclick = () => stk ? openStQuick() : launch(e.id);
+      if (stk) b.title = e.name + ' · สั่งด่วน';
       box.appendChild(b);
     });
     if (items.length > maxIcons()) {
@@ -851,6 +853,14 @@
         const { error: e } = await sb.rpc('st_chat_set', { p_room: key, p_shop: l.shop_id, p_events: { [k]: v } });
         if (e) { extErr(e); return false; } return true;
       })));
+      body.appendChild(switchRow('🛍 สั่งด่วนจากห้องนี้', 'คนในห้องกดไอคอน 🍽️ แล้วสั่งเมนูด่วน รับที่ร้านแบบคิว' + (l.quick_n != null ? ` · เมนูด่วน ${l.quick_n} รายการ` : ''), l.quick, async v => {
+        if (v && l.manage && !l.quick_n) toast('อย่าลืมเลือกเมนูด่วนด้วย', 'info');
+        const { error: e } = await sb.rpc('st_chat_set', { p_room: key, p_shop: l.shop_id, p_events: { quick: v } });
+        if (e) { extErr(e); return false; }
+        if (v) { const S = kindExt('smarttable'); if (S && !EXT.roomExt.includes(S.id)) loadRoom(); }
+        return true;
+      }));
+      if (l.manage) body.appendChild(actionBtn(`⭐ เลือกเมนูด่วน (${l.quick_n || 0})`, () => openStQuickPicker(l.shop_id, l.name), 'secondary-btn'));
       body.appendChild(actionBtn('📊 ส่งสรุปยอดวันนี้ตอนนี้', async () => {
         const { error: e } = await sb.rpc('st_chat_send_summary', { p_room: key, p_shop: l.shop_id });
         if (e) return extErr(e);
@@ -865,6 +875,246 @@
       un.style.marginTop = '6px';
       body.appendChild(un);
     });
+  }
+
+  // ---------- 🛍 สั่งด่วนจากห้องแชท (st-28) ----------
+  const ST_BASE = (() => { try { return new URL('../smarttable/', location.href).href; } catch (x) { return '../smarttable/'; } })();
+  const ST_ERR = {
+    st_quick_off: 'ร้านนี้ปิดสั่งด่วนในห้องนี้อยู่', st_shop_closed: 'ร้านปิดอยู่ตอนนี้', st_too_many_orders: 'สั่งถี่เกินไป (ไม่เกิน 5 ครั้งใน 10 นาที) รอสักครู่',
+    st_item_sold_out: 'มีเมนูหมดแล้ว ลองเลือกใหม่', st_item_gone: 'มีเมนูที่ร้านเอาออกจากเมนูด่วนแล้ว ลองเปิดใหม่', st_options_required: 'ยังเลือกตัวเลือกที่จำเป็นไม่ครบ',
+    st_options_changed: 'ตัวเลือกของเมนูเปลี่ยนแล้ว ลองเปิดใหม่', st_bad_contact: 'ใส่ชื่อผู้รับ (ไม่เกิน 40 ตัวอักษร)', st_queue_full: 'คิวของร้านเต็มแล้ว',
+    st_ext_locked: 'ร้านนี้ยังไม่ได้ต่อสิทธิ์ SmartTable สั่งไม่ได้ชั่วคราว', st_out_of_stock: 'มีเมนูเหลือไม่พอ', st_bad_cart: 'รายการไม่ถูกต้อง',
+    st_quick_limit: 'เลือกเมนูด่วนได้ไม่เกิน 30 รายการ', st_forbidden: 'เฉพาะเจ้าของร้าน/ผู้จัดการ', st_table_not_found: 'ไม่พบร้านนี้'
+  };
+  const stErr = error => {
+    const msg = (error && error.message) || '';
+    const k = Object.keys(ST_ERR).find(x => msg.includes(x));
+    if (k) return toast(ST_ERR[k], 'error');
+    if (/st_chat_(order|quick)/.test(msg) && /Could not find the function|does not exist/i.test(msg)) return toast('ยังไม่ได้ติดตั้งสั่งด่วน: รัน st-28-quick.sql ก่อน', 'error');
+    return extErr(error);
+  };
+  const stBaht = n => '฿' + Number(n || 0).toLocaleString('th-TH', { maximumFractionDigits: 2 });
+  const stImg = p => { try { return sb.storage.from('st-images').getPublicUrl(p).data.publicUrl; } catch (x) { return ''; } };
+  const stMine = {
+    all() { try { return JSON.parse(localStorage.getItem('st-chat-orders') || '{}'); } catch (x) { return {}; } },
+    get(id) { return this.all()[id] || null; },
+    set(id, v) {
+      const a = this.all(); a[id] = v;
+      const cut = Date.now() - 2 * 86400000;
+      Object.keys(a).forEach(k => { if (!a[k] || a[k].at < cut) delete a[k]; });
+      try { localStorage.setItem('st-chat-orders', JSON.stringify(a)); } catch (x) { /* ไม่เป็นไร */ }
+    }
+  };
+  const stOpenTicket = qr => window.open(ST_BASE + 'table.html?t=' + encodeURIComponent(qr), '_blank', 'noopener');
+
+  async function openStQuick(shopId) {
+    const key = EXT.roomKey;
+    if (!key || !/^(g|d):/.test(key)) return toast('สั่งด่วนได้ในแชทกลุ่มและแชทสองคน', 'error');
+    const { data, error } = await sb.rpc('st_chat_quick_menu', { p_room: key });
+    if (error) return stErr(error);
+    const shops = data || [];
+    ensureModal('st-quick-modal', 'st-quick-box');
+    const body = $('st-quick-modal-body');
+    body.innerHTML = '';
+    body.appendChild(el('h3', '', '🛍 สั่งด่วน · รับที่ร้าน'));
+    if (!shops.length) {
+      body.appendChild(el('p', 'hint', 'ห้องนี้ยังไม่มีร้านที่เปิดสั่งด่วน\nเจ้าของร้าน: ⋮ > ส่วนขยาย > ตั้งค่าแจ้งเตือนส่วนขยาย > เปิด "สั่งด่วนจากห้องนี้" และเลือกเมนูด่วน'));
+      const S = kindExt('smarttable');
+      if (S && S.can_use) body.appendChild(actionBtn('🍽️ เปิดแอป SmartTable', () => { closeM('st-quick-modal'); launch(S.id); }, 'secondary-btn'));
+      body.appendChild(actionBtn('ปิด', () => closeM('st-quick-modal'), 'secondary-btn'));
+      return openModal('st-quick-modal');
+    }
+    let shop = shops.find(s => s.shop_id === shopId) || shops[0];
+    const cart = new Map();   // item_id -> { qty, choices:Set }
+    const wrap = el('div', 'st-q');
+    body.appendChild(wrap);
+
+    const draw = () => {
+      wrap.innerHTML = '';
+      if (shops.length > 1) {
+        const tabs = el('div', 'st-q-tabs');
+        shops.forEach(s => {
+          const b = el('button', 'chip' + (s.shop_id === shop.shop_id ? ' primary' : ''), s.name);
+          b.type = 'button';
+          b.onclick = () => { if (s.shop_id !== shop.shop_id) { shop = s; cart.clear(); draw(); } };
+          tabs.appendChild(b);
+        });
+        wrap.appendChild(tabs);
+      }
+      wrap.appendChild(el('div', 'st-q-shop', `${shop.is_open ? '🟢' : '🔴'} ${shop.name}`));
+      if (!shop.is_open) {
+        wrap.appendChild(el('p', 'hint', 'ร้านปิดอยู่ตอนนี้ สั่งได้เมื่อร้านเปิด'));
+        wrap.appendChild(actionBtn('ปิด', () => closeM('st-quick-modal'), 'secondary-btn'));
+        return;
+      }
+      const name = document.createElement('input');
+      name.className = 'st-q-input'; name.maxLength = 40; name.placeholder = 'ชื่อผู้รับ (ร้านจะเรียกชื่อนี้)';
+      name.value = localStorage.getItem('st-chat-name') || (currentUser && currentUser.nickname) || '';
+      const lbl = el('label', 'st-q-lbl', 'ชื่อผู้รับ');
+      wrap.append(lbl, name);
+
+      const list = el('div', 'st-q-list');
+      if (!shop.items.length) list.appendChild(el('p', 'hint', 'ร้านยังไม่ได้เลือกเมนูด่วน'));
+      const totalEl = el('div', 'st-q-total');
+      const sendBtn = actionBtn('ส่งออร์เดอร์', () => send());
+      const unit = it => {
+        const c = cart.get(it.id);
+        let p = Number(it.price);
+        if (c) it.groups.forEach(g => g.choices.forEach(ch => { if (c.choices.has(ch.id)) p += Number(ch.price || 0); }));
+        return p;
+      };
+      const refresh = () => {
+        let t = 0, n = 0;
+        shop.items.forEach(it => { const c = cart.get(it.id); if (c && c.qty) { t += unit(it) * c.qty; n += c.qty; } });
+        totalEl.textContent = n ? `${n} รายการ · รวม ${stBaht(t)}` : 'ยังไม่ได้เลือกเมนู';
+        sendBtn.disabled = !n;
+      };
+      shop.items.forEach(it => {
+        const row = el('div', 'st-q-item' + (it.available ? '' : ' off'));
+        const top = el('div', 'st-q-top');
+        if (it.image_path) { const im = document.createElement('img'); im.src = stImg(it.image_path); im.alt = ''; im.loading = 'lazy'; top.appendChild(im); }
+        const info = el('div', 'st-q-info');
+        info.append(el('strong', '', it.name), el('span', 'hint', it.available ? stBaht(it.price) : 'หมด'));
+        top.appendChild(info);
+        const opts = el('div', 'st-q-opts');
+        const qty = el('span', 'st-q-qty', '0');
+        const step = d => {
+          const c = cart.get(it.id) || { qty: 0, choices: new Set() };
+          c.qty = Math.max(0, Math.min(20, c.qty + d));
+          if (c.qty) cart.set(it.id, c); else cart.delete(it.id);
+          qty.textContent = String(c.qty);
+          row.classList.toggle('on', c.qty > 0);
+          drawOpts();
+          refresh();
+        };
+        const drawOpts = () => {
+          opts.innerHTML = '';
+          const c = cart.get(it.id);
+          if (!c || !it.groups.length) return;
+          it.groups.forEach(g => {
+            const gl = el('div', 'st-q-grp', g.name + (g.min > 0 ? ' *' : '') + (g.max > 1 ? ` (เลือกได้ ${g.max})` : ''));
+            const cr = el('div', 'chip-row');
+            g.choices.forEach(ch => {
+              const b = el('button', 'chip' + (c.choices.has(ch.id) ? ' primary' : ''), ch.name + (Number(ch.price) ? ' +' + stBaht(ch.price) : ''));
+              b.type = 'button';
+              b.onclick = () => {
+                if (c.choices.has(ch.id)) c.choices.delete(ch.id);
+                else {
+                  const inG = g.choices.filter(x => c.choices.has(x.id));
+                  if (g.max === 1) inG.forEach(x => c.choices.delete(x.id));
+                  else if (g.max && inG.length >= g.max) return toast(`${g.name} เลือกได้ไม่เกิน ${g.max}`, 'info');
+                  c.choices.add(ch.id);
+                }
+                drawOpts(); refresh();
+              };
+              cr.appendChild(b);
+            });
+            opts.append(gl, cr);
+          });
+        };
+        if (it.available) {
+          const ctl = el('div', 'st-q-ctl');
+          const mi = el('button', 'icon-btn', '−'); mi.type = 'button'; mi.onclick = () => step(-1);
+          const pl = el('button', 'icon-btn', '+'); pl.type = 'button'; pl.onclick = () => step(1);
+          ctl.append(mi, qty, pl);
+          top.appendChild(ctl);
+        }
+        row.append(top, opts);
+        list.appendChild(row);
+      });
+      wrap.appendChild(list);
+      const note = document.createElement('input');
+      note.className = 'st-q-input'; note.maxLength = 200; note.placeholder = 'หมายเหตุถึงร้าน (ถ้ามี)';
+      wrap.appendChild(note);
+      wrap.appendChild(el('p', 'hint', 'รับที่ร้านตามคิว · จ่ายที่ร้าน' + (shop.promptpay ? ' หรือ PromptPay + แนบสลิป' : '')));
+      wrap.appendChild(totalEl);
+      const acts = el('div', 'stack');
+      acts.append(sendBtn, actionBtn('ยกเลิก', () => closeM('st-quick-modal'), 'secondary-btn'));
+      wrap.appendChild(acts);
+      refresh();
+
+      let ref = null;
+      async function send() {
+        const nm = name.value.trim();
+        if (!nm) { name.focus(); return toast('ใส่ชื่อผู้รับก่อน', 'error'); }
+        const items = [];
+        for (const it of shop.items) {
+          const c = cart.get(it.id);
+          if (!c || !c.qty) continue;
+          for (const g of it.groups) {
+            const k = g.choices.filter(x => c.choices.has(x.id)).length;
+            if (k < (g.min || 0)) return toast(`${it.name}: เลือก "${g.name}" ก่อน`, 'error');
+          }
+          items.push({ item_id: it.id, qty: c.qty, choices: [...c.choices] });
+        }
+        if (!items.length) return;
+        ref = ref || ((crypto.randomUUID && crypto.randomUUID()) || String(Date.now()) + Math.random().toString(36).slice(2));
+        sendBtn.disabled = true; sendBtn.textContent = 'กำลังส่ง…';
+        const { data: r, error: e } = await sb.rpc('st_chat_order', { p_room: key, p_shop: shop.shop_id, p_items: items, p_name: nm, p_note: note.value.trim() || null, p_client_ref: ref });
+        sendBtn.disabled = false; sendBtn.textContent = 'ส่งออร์เดอร์';
+        if (e) { if (/st_/.test(e.message || '')) ref = null; return stErr(e); }
+        try { localStorage.setItem('st-chat-name', nm); } catch (x) { /* ไม่เป็นไร */ }
+        stMine.set(r.order_id, { qr: r.qr_token, no: r.queue_no, at: Date.now() });
+        done(r);
+      }
+    };
+
+    const done = r => {
+      body.innerHTML = '';
+      body.appendChild(el('h3', '', '✅ สั่งแล้ว'));
+      const big = el('div', 'st-q-done');
+      big.append(el('div', 'hint', r.shop_name), el('div', 'st-q-no', 'คิว ' + r.queue_no), el('div', '', 'ยอด ' + stBaht(r.subtotal)));
+      body.appendChild(big);
+      body.appendChild(el('p', 'hint', 'ร้านได้รับออร์เดอร์แล้ว จะแจ้งในห้องนี้เมื่อคิวพร้อมรับ'));
+      const st = el('div', 'stack');
+      if (r.promptpay) st.appendChild(actionBtn('📱 จ่าย PromptPay / แนบสลิป', () => stOpenTicket(r.qr_token)));
+      st.appendChild(actionBtn('💵 จ่ายที่ร้านตอนรับ', () => closeM('st-quick-modal'), r.promptpay ? 'secondary-btn' : ''));
+      st.appendChild(actionBtn('ดูบัตรคิว', () => stOpenTicket(r.qr_token), 'secondary-btn'));
+      body.appendChild(st);
+    };
+
+    draw();
+    openModal('st-quick-modal');
+  }
+
+  async function openStQuickPicker(shopId, shopName) {
+    const { data, error } = await sb.rpc('st_chat_quick_admin', { p_shop: shopId });
+    if (error) return stErr(error);
+    ensureModal('st-qpick-modal', 'st-quick-box');
+    const body = $('st-qpick-modal-body');
+    body.innerHTML = '';
+    body.appendChild(el('h3', '', '⭐ เมนูด่วน · ' + shopName));
+    body.appendChild(el('p', 'hint', 'เลือกเมนูที่ให้คนในห้องสั่งด่วนได้ (ไม่เกิน 30) · ใช้กับทุกห้องที่เชื่อมร้านนี้'));
+    const sel = new Set((data || []).filter(x => x.quick).map(x => x.id));
+    const list = el('div', 'st-q-list');
+    let cat = null;
+    (data || []).forEach(it => {
+      if ((it.cat || '') !== cat) { cat = it.cat || ''; list.appendChild(el('div', 'st-q-grp', cat || 'ไม่มีหมวด')); }
+      const row = el('label', 'st-q-pick');
+      const cb = document.createElement('input');
+      cb.type = 'checkbox'; cb.checked = sel.has(it.id);
+      cb.onchange = () => {
+        if (cb.checked && sel.size >= 30) { cb.checked = false; return toast(ST_ERR.st_quick_limit, 'info'); }
+        cb.checked ? sel.add(it.id) : sel.delete(it.id);
+        cnt.textContent = `เลือกแล้ว ${sel.size} รายการ`;
+      };
+      row.append(cb, el('span', '', it.name + (it.available ? '' : ' (หมด)')), el('span', 'hint', stBaht(it.price)));
+      list.appendChild(row);
+    });
+    if (!(data || []).length) list.appendChild(el('p', 'hint', 'ร้านยังไม่มีเมนู: เพิ่มเมนูในแอป SmartTable ก่อน'));
+    body.appendChild(list);
+    const cnt = el('div', 'st-q-total', `เลือกแล้ว ${sel.size} รายการ`);
+    body.appendChild(cnt);
+    const st = el('div', 'stack');
+    st.append(actionBtn('บันทึก', async () => {
+      const { data: n, error: e } = await sb.rpc('st_chat_quick_set', { p_shop: shopId, p_items: [...sel] });
+      if (e) return stErr(e);
+      toast(`บันทึกเมนูด่วน ${n} รายการแล้ว`, 'success');
+      closeM('st-qpick-modal');
+      if ($('ext-notify-modal') && !$('ext-notify-modal').classList.contains('hidden-element')) openExtNotify();
+    }), actionBtn('ยกเลิก', () => closeM('st-qpick-modal'), 'secondary-btn'));
+    body.appendChild(st);
+    openModal('st-qpick-modal');
   }
 
   const WDAY = ['อา', 'จ', 'อ', 'พ', 'พฤ', 'ศ', 'ส'];
@@ -1166,13 +1416,18 @@
       head.appendChild(tm);
       card.appendChild(head);
       card.appendChild(el('div', 'ext-msg-body', String(m.text || '').replace(/^(🏠|📌) สมุดบ้าน: /, '$1 ')));
-      if (KIND && L && L.can_use) {
-        const a = el('div', 'ext-msg-acts');
-        const o = chip2(KIND[3], () => launch(L.id));
-        o.className = 'chip primary';
-        a.appendChild(o);
-        card.appendChild(a);
+      const a = el('div', 'ext-msg-acts');
+      if (meta.ext === 'smarttable') {
+        const mine = meta.order && meta.type === 'quick' ? stMine.get(meta.order) : null;
+        if (mine) { const p = chip2('💳 จ่าย / ดูคิว', () => stOpenTicket(mine.qr)); p.className = 'chip primary'; a.appendChild(p); }
+        if (['quick', 'ready', 'linked'].includes(meta.type)) a.appendChild(chip2('🛍 สั่งด่วน', () => openStQuick(meta.shop)));
       }
+      if (KIND && L && L.can_use && !(meta.ext === 'smarttable' && ['quick', 'ready'].includes(meta.type))) {
+        const o = chip2(KIND[3], () => launch(L.id));
+        o.className = 'chip' + (a.childNodes.length ? '' : ' primary');
+        a.appendChild(o);
+      }
+      if (a.childNodes.length) card.appendChild(a);
       row.replaceWith(card);
     });
   }
@@ -2695,7 +2950,10 @@
     if (KG && EXT.roomKey && /^(g|d):/.test(EXT.roomKey)) go(KG.can_use ? '🎮 เชื่อมเกมเด็กกับห้องนี้' : '🔒 เชื่อมเกมเด็กกับห้องนี้ (ต้องซื้อหรือทดลองใช้)', linkKidGame);
     if (BD && EXT.roomKey && /^(g|d):/.test(EXT.roomKey)) go(BD.can_use ? '🎯 เชื่อมกระดาน 00–99 กับห้องนี้' : '🔒 เชื่อมกระดาน 00–99 กับห้องนี้ (ต้องซื้อหรือทดลองใช้)', linkBoard);
     const STX = kindExt('smarttable');
-    if (STX && EXT.roomKey && /^(g|d):/.test(EXT.roomKey)) go('🍽️ เชื่อม SmartTable (ร้านอาหาร) กับห้องนี้', linkSmartTable);
+    if (STX && EXT.roomKey && /^(g|d):/.test(EXT.roomKey)) {
+      go('🛍 สั่งด่วน (SmartTable)', () => openStQuick());
+      if (STX.can_use) go('🍽️ เชื่อม SmartTable (ร้านอาหาร) กับห้องนี้', linkSmartTable);
+    }
     go('🔔 ตั้งค่าแจ้งเตือนส่วนขยาย', openExtNotify);
     go(usable.length ? '🛒 ร้านส่วนขยาย (ซื้อเพิ่ม)' : '🛒 ร้านส่วนขยาย', () => openExtStore());
     det.appendChild(body);
@@ -2706,6 +2964,7 @@
   window.openExtStore = openExtStore;
   window.openRoomExtSheet = openRoomExtSheet;
   window.openExtNotify = openExtNotify;
+  window.openStQuick = openStQuick;
   window.openFamily = openFamily;
 
   // เผื่อสคริปต์นี้โหลดหลังจากล็อกอินไปแล้ว
