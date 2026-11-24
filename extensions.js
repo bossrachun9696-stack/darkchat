@@ -517,7 +517,7 @@
     rows.forEach(e => list.appendChild(extCard(e)));
     body.appendChild(list);
 
-    if (isAdmin()) { body.appendChild(adminBlock()); body.appendChild(adminPriceBlock()); body.appendChild(adminPayBlock()); if (EXT.list.some(e => e.kind === 'board')) body.appendChild(adminAnnounceBlock()); }
+    if (isAdmin()) { body.appendChild(adminBlock()); body.appendChild(adminPriceBlock()); body.appendChild(adminPayBlock()); body.appendChild(adminRightsBlock()); if (EXT.list.some(e => e.kind === 'board')) body.appendChild(adminAnnounceBlock()); }
     else if (EXT.famReady) {
       const fb = el('div', 'fam-store-bar');
       fb.appendChild(el('span', '', myFam() ? `👨‍👩‍👧 ครอบครัว "${myFam().name}" · ${(EXT.fam.members || []).length}/${FAM_MAX} คน` : '👨‍👩‍👧 ซื้อแบบครอบครัวได้ เมื่อสร้างหรือเข้าร่วมครอบครัว'));
@@ -1229,19 +1229,22 @@
     const kLedger = el('button', '', '🏠 สมุดบ้าน');
     const kKid = el('button', '', '🎮 เกมเด็ก');
     const kBoard = el('button', '', '🎯 กระดาน 00–99');
-    [kLink, kLedger, kKid, kBoard].forEach(b => { b.type = 'button'; });
-    kseg.append(kLink, kLedger, kKid, kBoard);
+    const kSt = el('button', '', '🍽️ SmartTable');
+    [kLink, kLedger, kKid, kBoard, kSt].forEach(b => { b.type = 'button'; });
+    kseg.append(kLink, kLedger, kKid, kBoard, kSt);
     kseg.classList.add('kind-seg');
     const kHint = el('span', 'hint', '');
     const KH = { link: 'กดไอคอนแล้วเปิดลิงก์', ledger: 'ห้องที่เพิ่มส่วนขยายนี้ เชื่อมกับบ้านในสมุดบ้านได้: แจ้งเตือนเมื่อแก้ไข สรุป 20:00 และเตือนบิล',
       kidgame: 'เกมเด็ก: ไม่มีสิทธิ์ = เข้าเกมไม่ได้ (ลูกใช้สิทธิ์ของผู้ปกครอง) · เชื่อมห้องแล้วแจ้งผลทุกครั้งที่ลูกเล่นจบรอบ',
-      board: 'กระดาน 00–99 (มหาเฮง): ไม่มีสิทธิ์ = ใช้กระดานไม่ได้ · เชื่อมห้องแล้วส่งสรุปงวดตามวัน-เวลาที่ตั้ง' };
-    const setKind = v => { kind = v; [[kLink, 'link'], [kLedger, 'ledger'], [kKid, 'kidgame'], [kBoard, 'board']].forEach(([b, k]) => b.classList.toggle('active', v === k));
+      board: 'กระดาน 00–99 (มหาเฮง): ไม่มีสิทธิ์ = ใช้กระดานไม่ได้ · เชื่อมห้องแล้วส่งสรุปงวดตามวัน-เวลาที่ตั้ง',
+      smarttable: 'SmartTable (ร้านอาหาร): สิทธิ์ของเจ้าของร้าน พนักงานใช้ตาม ลูกค้าสแกน QR ไม่ต้องมีสิทธิ์ · ไม่มีสิทธิ์ = สร้างร้าน/เปิดโต๊ะ/รับออร์เดอร์ไม่ได้' };
+    const setKind = v => { kind = v; [[kLink, 'link'], [kLedger, 'ledger'], [kKid, 'kidgame'], [kBoard, 'board'], [kSt, 'smarttable']].forEach(([b, k]) => b.classList.toggle('active', v === k));
       kHint.textContent = KH[v] || ''; };
     kLink.onclick = () => setKind('link');
     kLedger.onclick = () => setKind('ledger');
     kKid.onclick = () => setKind('kidgame');
     kBoard.onclick = () => setKind('board');
+    kSt.onclick = () => setKind('smarttable');
     setKind(kind);
     body.append(el('div', 'list-title', 'ชนิดส่วนขยาย'), kseg, kHint);
 
@@ -1496,6 +1499,221 @@
     body.append(t, d, isNew, prev, file, row, actionBtn('ยกเลิก', () => closeM('ann-modal')));
     openModal('ann-modal');
     setTimeout(() => t.focus(), 60);
+  }
+
+  // ---------- 🛡️ แอดมิน: ใครซื้ออะไร + ยกเลิกสิทธิ์ ----------
+  function adminRightsBlock() {
+    const box = el('div', 'ext-admin');
+    box.appendChild(el('div', 'list-title', '🛡️ สิทธิ์ผู้ใช้ (ใครซื้ออะไร)'));
+    box.appendChild(el('div', 'hint', 'ดูส่วนขยายและแพ็กเกจที่ทุกคนมี · ยกเลิกได้ตลอด (แจ้งล่วงหน้า 7 วัน หรือทันที) ระบบส่งข้อความแจ้งเข้าแชทส่วนตัวของคนนั้นให้'));
+    const b = chip2('🛡️ เปิดหน้าจัดการสิทธิ์', () => openRightsAdmin());
+    b.className = 'chip primary';
+    box.appendChild(b);
+    return box;
+  }
+  const RA = { tab: 'rights', q: '', filter: 'active', data: null, sales: null, revs: null };
+  const raAvatar = (who) => {
+    const a = el('span', 'ra-av');
+    try { renderAvatar(a, who && who.avatar, who && who.name); } catch (x) { a.textContent = '?'; }
+    return a;
+  };
+  const raKind = { trial: 'ทดลอง', paid: 'ซื้อแล้ว', granted: 'แอดมินให้', family: 'ครอบครัว', lifetime: 'ตลอดชีพ', monthly: 'รายเดือน' };
+  async function openRightsAdmin() {
+    ensureModal('ra-modal', 'confirm-box ra-box');
+    openModal('ra-modal');
+    await raLoad();
+  }
+  async function raLoad() {
+    const body = $('ra-modal-body');
+    body.innerHTML = '';
+    body.appendChild(el('div', 'hint', 'กำลังโหลด...'));
+    const [r, s, v] = await Promise.all([sb.rpc('ext_admin_rights'), sb.rpc('ext_admin_sales', { p_limit: 200 }), sb.rpc('ext_admin_revocations', { p_limit: 100 })]);
+    const err = r.error || s.error || v.error;
+    if (err) {
+      body.innerHTML = '';
+      body.appendChild(el('div', 'hint', /ext_admin_|schema cache|Could not find/i.test(err.message || '') ? 'ยังไม่ได้รัน supabase-ext-admin.sql' : extErrText(err)));
+      body.appendChild(actionBtn('ปิด', () => closeM('ra-modal')));
+      return;
+    }
+    RA.data = r.data; RA.sales = s.data; RA.revs = v.data;
+    raRender();
+  }
+  function raRender() {
+    const body = $('ra-modal-body');
+    body.innerHTML = '';
+    const head = el('div', 'ra-head');
+    head.appendChild(el('h3', '', '🛡️ สิทธิ์ผู้ใช้'));
+    const x = el('button', 'ra-x', '✕'); x.type = 'button'; x.onclick = () => closeM('ra-modal');
+    head.appendChild(x);
+    body.appendChild(head);
+    const tabs = el('div', 'ra-tabs');
+    [['rights', '👥 สิทธิ์ทั้งหมด'], ['sales', '🧾 ประวัติซื้อ'], ['revs', '⛔ การยกเลิก']].forEach(([k, t]) => {
+      const b = el('button', 'ra-tab' + (RA.tab === k ? ' on' : ''), t); b.type = 'button';
+      b.onclick = () => { RA.tab = k; raRender(); };
+      tabs.appendChild(b);
+    });
+    body.appendChild(tabs);
+    const wrap = el('div', 'ra-list');
+    if (RA.tab === 'rights') raRights(body, wrap);
+    else if (RA.tab === 'sales') raSales(body, wrap);
+    else raRevs(wrap);
+    body.appendChild(wrap);
+  }
+  function raMatch(row) {
+    const q = RA.q.trim().toLowerCase();
+    if (!q) return true;
+    const w = row.who || {};
+    return [w.name, w.username, w.email, row.item, row.family && row.family.name].some(s => String(s || '').toLowerCase().includes(q));
+  }
+  function raRights(body, wrap) {
+    const tools = el('div', 'ra-tools');
+    const q = document.createElement('input'); q.className = 'board-input'; q.placeholder = '🔎 ค้นหาชื่อ / ไอดี / อีเมล / สินค้า'; q.value = RA.q;
+    q.oninput = () => { RA.q = q.value; paint(); };
+    const f = document.createElement('select'); f.className = 'board-input';
+    [['active', 'ใช้งานอยู่'], ['pending', 'รอยกเลิก'], ['trial', 'ทดลอง'], ['all', 'ทั้งหมด (รวมหมดอายุ)']].forEach(([v, t]) => {
+      const o = document.createElement('option'); o.value = v; o.textContent = t; f.appendChild(o);
+    });
+    f.value = RA.filter; f.onchange = () => { RA.filter = f.value; paint(); };
+    tools.append(q, f);
+    body.appendChild(tools);
+    const sum = el('div', 'hint');
+    body.appendChild(sum);
+    const paint = () => {
+      wrap.innerHTML = '';
+      const rows = (RA.data.rights || []).filter(r => raMatch(r) && (
+        RA.filter === 'all' || (RA.filter === 'active' && r.active) || (RA.filter === 'pending' && r.pending) || (RA.filter === 'trial' && r.kind === 'trial' && r.active)));
+      sum.textContent = `${rows.length} รายการ`;
+      if (!rows.length) wrap.appendChild(el('div', 'hint', 'ไม่มีรายการ'));
+      rows.forEach(r => wrap.appendChild(raCard(r)));
+    };
+    paint();
+  }
+  function raCard(r) {
+    const card = el('div', 'ra-card' + (r.active ? '' : ' off') + (r.pending ? ' warn' : ''));
+    const top = el('div', 'ra-top');
+    top.appendChild(raAvatar(r.who));
+    const who = el('div', 'ra-who');
+    who.appendChild(el('strong', '', (r.who && r.who.name) || '?'));
+    who.appendChild(el('small', '', [r.who && r.who.username ? '@' + r.who.username : '', r.who && r.who.email].filter(Boolean).join(' · ')));
+    top.appendChild(who);
+    card.appendChild(top);
+    const item = el('div', 'ra-item');
+    item.appendChild(el('span', 'ra-ic', r.icon || '🧩'));
+    item.appendChild(el('b', '', r.item));
+    item.appendChild(el('span', 'ra-badge k-' + r.kind, raKind[r.kind] || r.kind));
+    if (r.target.endsWith('family')) item.appendChild(el('span', 'ra-badge k-family', '👪 ' + ((r.family && r.family.name) || 'ครอบครัว')));
+    card.appendChild(item);
+    const meta = [];
+    if (r.started_at) meta.push('เริ่ม ' + fmtDate(r.started_at));
+    meta.push(r.expires_at ? (r.active ? 'หมด ' : 'หมดแล้ว ') + fmtDate(r.expires_at) : (r.kind === 'trial' ? '' : 'ไม่มีวันหมด'));
+    if (r.price != null) meta.push('฿' + Number(r.price).toLocaleString('th-TH'));
+    card.appendChild(el('div', 'hint', meta.filter(Boolean).join(' · ')));
+    if (r.family && r.family.members && r.family.members.length) {
+      const mem = el('div', 'ra-mem');
+      mem.appendChild(el('small', 'hint', `สมาชิกที่ใช้ร่วม ${r.family.members.length} คน:`));
+      r.family.members.forEach(m => {
+        const pend = (RA.data.pending_members || []).find(p => p.family_id === r.family.id && p.user_id === m.id);
+        const c = el('span', 'ra-mchip' + (pend ? ' warn' : ''));
+        c.appendChild(raAvatar(m));
+        c.appendChild(el('span', '', m.name + (m.id === r.user_id ? ' (เจ้าของ)' : '') + (pend ? ' · ออก ' + fmtDate(pend.due_at) : '')));
+        if (m.id !== r.user_id) {
+          c.title = 'แตะเพื่อเอาออกจากครอบครัว';
+          c.onclick = () => pend ? raKeep(pend.id, m.name) : raRevokeDialog({ target: 'family_member', user_id: m.id, family_id: r.family.id, item: `${m.name} ออกจากครอบครัว "${r.family.name}"`, who: m });
+        }
+        mem.appendChild(c);
+      });
+      card.appendChild(mem);
+    }
+    if (r.pending) {
+      card.appendChild(el('div', 'ra-pend', `⏳ จะยกเลิก ${fmtDate(r.pending.due_at)}${r.pending.reason ? ' · ' + r.pending.reason : ''}`));
+    }
+    if (r.active) {
+      const acts = el('div', 'ext-acts');
+      if (r.pending) acts.appendChild(chip2('✅ คงสิทธิ์ไว้', () => raKeep(r.pending.id, r.item)));
+      const d = chip2(r.pending ? '⛔ ยกเลิกทันที' : '⛔ ยกเลิกสิทธิ์', () => raRevokeDialog(r, !!r.pending));
+      d.classList.add('danger');
+      acts.appendChild(d);
+      card.appendChild(acts);
+    }
+    return card;
+  }
+  function raRevokeDialog(r, nowOnly) {
+    ensureModal('ra-rv', 'confirm-box rec-box');
+    const body = $('ra-rv-body');
+    body.innerHTML = '';
+    body.appendChild(el('h3', '', '⛔ ยกเลิกสิทธิ์'));
+    body.appendChild(el('div', 'hint', `${(r.who && r.who.name) || ''} · ${r.item}`));
+    const reason = document.createElement('textarea'); reason.className = 'plain-input'; reason.rows = 3; reason.maxLength = 300;
+    reason.placeholder = 'เหตุผล (คนนั้นจะเห็นในข้อความ) เช่น ตรวจพบการใช้สิทธิ์ร่วมกับคนนอกครอบครัว';
+    const opt = el('div', 'ra-opts');
+    const mk = (v, t, on) => { const l = document.createElement('label'); const i = document.createElement('input'); i.type = 'radio'; i.name = 'ra-days'; i.value = v; i.checked = on; l.append(i, document.createTextNode(' ' + t)); opt.appendChild(l); return i; };
+    const d7 = mk('7', 'แจ้งล่วงหน้า 7 วัน แล้วยกเลิกอัตโนมัติ (แนะนำ)', !nowOnly);
+    mk('0', 'ยกเลิกทันที (กรณีสวมสิทธิ์ชัดเจน)', !!nowOnly);
+    if (nowOnly) d7.disabled = true;
+    let all = null;
+    if (r.target === 'ext_family' || r.target === 'pkg_family') {
+      const l = document.createElement('label'); l.className = 'hint'; all = document.createElement('input'); all.type = 'checkbox';
+      l.append(all, document.createTextNode(' ส่งข้อความแจ้งทุกคนในครอบครัว (ไม่ติ๊ก = แจ้งเฉพาะเจ้าของครอบครัว)'));
+      opt.appendChild(l);
+    }
+    const go = chip2('ยืนยันยกเลิก', async () => {
+      const days = +opt.querySelector('input[name=ra-days]:checked').value;
+      if (days === 0 && !(await confirmDialog('ยกเลิกทันที', 'สิทธิ์จะหายทันทีและส่งข้อความแจ้ง ยืนยันไหม?', 'ยกเลิกทันที', true))) return;
+      go.disabled = true;
+      const { data, error } = await sb.rpc('ext_admin_revoke', {
+        p_target: r.target, p_user: r.target.endsWith('family') ? null : (r.user_id || null), p_family: r.family_id || null,
+        p_ext: r.ext_id || null, p_product: r.product || null, p_reason: reason.value.trim(), p_days: days, p_notify_all: !!(all && all.checked) });
+      go.disabled = false;
+      if (error) return toast(/owner_cannot/.test(error.message || '') ? 'เอาเจ้าของครอบครัวออกไม่ได้' : extErrText(error), 'error');
+      closeM('ra-rv');
+      toast(days === 0 ? `ยกเลิกแล้ว · ส่งข้อความแจ้ง ${data.notified} คน` : `ตั้งยกเลิกวันที่ ${fmtDate(data.due_at)} · ส่งข้อความแจ้ง ${data.notified} คน`, 'success');
+      await raLoad();
+    });
+    go.className = 'chip danger';
+    body.append(reason, opt, go, actionBtn('ไม่ยกเลิก', () => closeM('ra-rv')));
+    openModal('ra-rv');
+  }
+  async function raKeep(id, label) {
+    if (!(await confirmDialog('คงสิทธิ์ไว้', `ไม่ยกเลิก "${label}" แล้วส่งข้อความแจ้งว่าใช้ต่อได้?`, 'คงสิทธิ์ไว้'))) return;
+    const { error } = await sb.rpc('ext_admin_revoke_cancel', { p_id: id, p_notify: true });
+    if (error) return toast(extErrText(error), 'error');
+    toast('คงสิทธิ์ไว้แล้ว · ส่งข้อความแจ้งแล้ว', 'success');
+    await raLoad();
+  }
+  function raSales(body, wrap) {
+    const m = (RA.sales.months || []);
+    if (m.length) {
+      const g = el('div', 'ra-months');
+      m.slice(0, 6).forEach(x => { const c = el('div', 'ra-month'); c.appendChild(el('small', '', x.month)); c.appendChild(el('b', '', '฿' + Number(x.total).toLocaleString('th-TH'))); c.appendChild(el('small', '', x.count + ' รายการ')); g.appendChild(c); });
+      body.appendChild(g);
+    }
+    const st = { requested: 'รอโอน', slip_sent: 'ส่งสลิปแล้ว', approved: '✅ อนุมัติ', granted: '✅ อนุมัติ', rejected: '❌ ปฏิเสธ', cancelled: 'ยกเลิก' };
+    const rows = RA.sales.history || [];
+    if (!rows.length) wrap.appendChild(el('div', 'hint', 'ยังไม่มีการซื้อ'));
+    rows.forEach(h => {
+      const c = el('div', 'ra-card' + (/approved|granted/.test(h.status) ? '' : ' off'));
+      const top = el('div', 'ra-top');
+      top.appendChild(raAvatar(h.who));
+      const w = el('div', 'ra-who');
+      w.appendChild(el('strong', '', h.who.name));
+      w.appendChild(el('small', '', [h.who.username ? '@' + h.who.username : '', h.who.email].filter(Boolean).join(' · ')));
+      top.appendChild(w);
+      top.appendChild(el('b', 'ra-price', '฿' + Number(h.price || 0).toLocaleString('th-TH')));
+      c.appendChild(top);
+      c.appendChild(el('div', 'hint', `${h.icon || ''} ${h.item} · ${/family/.test(h.scope) ? 'ครอบครัว' : 'รายคน'}${/lifetime/.test(h.scope) ? ' · ตลอดชีพ' : /monthly/.test(h.scope) ? ' · รายเดือน' : ''} · ${st[h.status] || h.status} · ${fmtDate(h.created_at)}`));
+      wrap.appendChild(c);
+    });
+  }
+  function raRevs(wrap) {
+    const st = { pending: '⏳ รอยกเลิก', done: '⛔ ยกเลิกแล้ว', cancelled: '✅ ไม่ยกเลิก' };
+    if (!RA.revs.length) wrap.appendChild(el('div', 'hint', 'ยังไม่เคยยกเลิกสิทธิ์ใคร'));
+    RA.revs.forEach(v => {
+      const c = el('div', 'ra-card' + (v.status === 'pending' ? ' warn' : ''));
+      c.appendChild(el('strong', '', `${v.who} · ${v.item}`));
+      c.appendChild(el('div', 'hint', `${st[v.status]} · สั่งเมื่อ ${fmtDate(v.created_at)} · กำหนด ${fmtDate(v.due_at)}${v.reason ? ' · ' + v.reason : ''}`));
+      if (v.status === 'pending') { const a = el('div', 'ext-acts'); a.appendChild(chip2('✅ คงสิทธิ์ไว้', () => raKeep(v.id, v.item))); c.appendChild(a); }
+      wrap.appendChild(c);
+    });
   }
 
   function adminBlock() {
