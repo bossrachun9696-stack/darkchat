@@ -1,10 +1,12 @@
-const CACHE_NAME = 'darkchat-cache-v16';
+const CACHE_NAME = 'darkchat-cache-v17';
 const META_CACHE = 'darkchat-meta'; // เก็บเลขข้อความที่ยังไม่ได้อ่าน (ใช้กับป้ายบนไอคอน)
 const ASSETS = [
   './',
   './index.html',
   './style.css',
   './app.js',
+  './extensions.css',
+  './extensions.js',
   './manifest.json',
   './icon.svg'
 ];
@@ -12,7 +14,7 @@ const ASSETS = [
 self.addEventListener('install', (event) => {
   event.waitUntil(
     caches.open(CACHE_NAME)
-      .then((cache) => cache.addAll(ASSETS))
+      .then((cache) => cache.addAll(ASSETS.map((u) => new Request(u, { cache: 'reload' }))))
       .catch((err) => console.log('SW precache error:', err))
   );
   self.skipWaiting();
@@ -29,23 +31,28 @@ self.addEventListener('activate', (event) => {
   self.clients.claim();
 });
 
-// network-first: ได้ไฟล์ล่าสุดเสมอ ถ้าออฟไลน์ค่อยใช้แคช
+// เปิดเร็ว (stale-while-revalidate): ส่งไฟล์จากเครื่องทันที แล้วโหลดตัวใหม่เก็บไว้เบื้องหลัง
+// (ครั้งหน้าที่เปิดได้ไฟล์ใหม่) · ไม่มีในเครื่อง = โหลดจากเน็ต · ออฟไลน์ = ใช้ของในเครื่อง
+// อัปเดตแอป: เปลี่ยนเลข CACHE_NAME ทุกครั้งที่อัปโหลดไฟล์ใหม่
 self.addEventListener('fetch', (event) => {
   const req = event.request;
   const url = new URL(req.url);
   if (req.method !== 'GET' || url.origin !== self.location.origin) return;
+  const nav = req.mode === 'navigate';
+  if (nav && !/\/(index\.html)?$/.test(url.pathname)) return;   // หน้าอื่น (ไม่ใช่ตัวแอป) โหลดจากเน็ตตามปกติ
+  const key = nav ? './index.html' : req;
 
-  event.respondWith(
-    fetch(req)
-      .then((res) => {
-        if (res && res.ok) {
-          const copy = res.clone();
-          caches.open(CACHE_NAME).then((cache) => cache.put(req, copy));
-        }
-        return res;
-      })
-      .catch(() => caches.match(req).then((hit) => hit || caches.match('./index.html')))
-  );
+  event.respondWith((async () => {
+    const cache = await caches.open(CACHE_NAME);
+    const hit = await cache.match(key, { ignoreSearch: nav });
+    const net = fetch(req).then((res) => {
+      if (res && res.ok && res.type === 'basic') cache.put(key, res.clone()).catch(() => {});
+      return res;
+    });
+    if (hit) { event.waitUntil(net.catch(() => {})); return hit; }
+    try { return await net; }
+    catch (e) { return (await cache.match('./index.html')) || Response.error(); }
+  })());
 });
 
 // ---------- Web Push ----------

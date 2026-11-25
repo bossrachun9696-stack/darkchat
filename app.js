@@ -164,6 +164,10 @@ async function enterApp(user) {
     resetChatView();
     $('chat-list').innerHTML = '<div class="chat-empty">กำลังโหลดแชท...</div>';
 
+    // เปิดเร็ว: ยิงคำขอที่ไม่ต้องรอกันพร้อมกัน (เดิมรอทีละอย่าง ~6 รอบ)
+    const pMsgs = fetchInitialRows();
+    const pSocialGroups = Promise.all([loadSocial(), loadGroups()]);
+    pSocialGroups.catch(() => {});
     await loadMyProfile();
     updateUserProfileUI();
     try { localStorage.setItem('darkchat_who_' + currentUser.id, JSON.stringify({ name: currentUser.username, avatar: currentUser.avatar || '' })); } catch (e) { /* ไม่เป็นไร */ }
@@ -179,9 +183,8 @@ async function enterApp(user) {
     loadShopCart();
     startShopPolling();
     checkRingingCalls();
-    await loadSocial();
-    await loadGroups();
-    await loadInitialData();
+    await pSocialGroups;
+    await loadInitialData(pMsgs);
     subscribeRealtime();
     loadChatList();
     renderSocialUI();
@@ -696,16 +699,17 @@ async function fetchContact(id) {
   return data;
 }
 
-async function loadInitialData() {
+function fetchInitialRows() {
+  return sb.from('messages').select('*').order('created_at', { ascending: false }).limit(500)
+    .then(r => r, e => ({ data: null, error: e }));
+}
+async function loadInitialData(pre) {
   const me = currentUser.id;
 
-  // ลบข้อความของเราที่หมดเวลาแล้ว
-  await sb.from('messages').delete().eq('sender_id', me).lte('expires_at', new Date().toISOString());
+  // ลบข้อความของเราที่หมดเวลาแล้ว (ไม่ต้องรอ: ข้อความหมดเวลาถูกกรองออกด้านล่างอยู่แล้ว)
+  sb.from('messages').delete().eq('sender_id', me).lte('expires_at', new Date().toISOString()).then(() => {}, () => {});
 
-  const { data: rows, error } = await sb.from('messages')
-    .select('*')
-    .order('created_at', { ascending: false })
-    .limit(500);
+  const { data: rows, error } = await (pre || fetchInitialRows());
   if (error) { handleDbError(error); return; }
   state.historyAll = rows.length < 500; // ถ้าได้น้อยกว่า 500 แปลว่าโหลดประวัติครบแล้ว
 
@@ -1070,8 +1074,7 @@ function updateBadges() {
       if (!activeChat || activeChat.id !== id) others += n;
     });
   }
-  const appT = window.__appTitle || 'DarkChat';
-  document.title = total > 0 ? `(${total > 99 ? '99+' : total}) ${appT}` : appT;
+  document.title = total > 0 ? `(${total > 99 ? '99+' : total}) DarkChat` : 'DarkChat';
 
   if (total !== lastBadgeTotal) {
     lastBadgeTotal = total;
@@ -7367,7 +7370,7 @@ const bo = { msgs: [], busy: false, bubbleIdx: 0, bubbleHidden: false, purchases
 
 // ---------- รูปน้อง: ไฟล์ "Ai Assistant/1.png" ถึง "14.png" เปลี่ยนรูปทุก 10 นาที ----------
 function boImageIndex() { return (Math.floor(Date.now() / 600000) % BO_IMG_COUNT) + 1; }
-let boExt = 'png';   // นามสกุลไฟล์ที่ใช้ได้จริง (ลอง png ก่อน ถ้าไม่ได้ลอง PNG)
+let boExt = 'webp';   // ไฟล์เล็ก N.webp (~30 KB) ก่อน ถ้าไม่มีค่อยลอง png แล้ว PNG (ไฟล์ใหญ่ ~3 MB)
 function boImageUrl(n, ext) { return encodeURI('Ai Assistant/' + n + '.' + (ext || boExt)); }
 
 function refreshBoImages() {
@@ -7883,16 +7886,17 @@ function boPick() {
 function boImgError(img) {
   const n = parseInt(img.dataset.n || '0', 10);
   const ext = img.dataset.ext || boExt;
+  if (ext === 'webp') { img.dataset.ext = 'png'; img.src = boImageUrl(n, 'png'); return; }
   if (ext === 'png') { img.dataset.ext = 'PNG'; img.src = boImageUrl(n, 'PNG'); return; }
   boBad.add(n);
   const next = boPick();
   if (!next) { img.classList.add('failed'); return; }
   img.dataset.n = String(next);
-  img.dataset.ext = boExt === 'PNG' ? 'PNG' : 'png';
-  img.src = boImageUrl(next, img.dataset.ext);
+  img.dataset.ext = 'webp';
+  img.src = boImageUrl(next, 'webp');
 }
 
-function boImgOk(img) { if (img.dataset.ext) boExt = img.dataset.ext; }
+function boImgOk(img) { /* เริ่มจาก webp ทุกรูป (รูปที่ยังไม่มี webp จะถอยไป png/PNG เอง) */ }
 
 function boInitImg(img) {
   const n = boPick();
