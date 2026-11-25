@@ -22,6 +22,10 @@
   const maxIcons = () => (window.matchMedia('(max-width: 760px)').matches ? 1 : 3);
   const ERR = {
     ext_locked: 'ส่วนขยายนี้ต้องซื้อหรือทดลองใช้ก่อน',
+    ivp_too_many_rooms: 'เชื่อมแผนลงทุนได้สูงสุด 3 ห้อง ยกเลิกห้องเก่าก่อน',
+    ivp_locked: 'แผนลงทุนต้องซื้อหรือทดลองใช้ก่อน',
+    ivp_not_linked: 'ห้องนี้ยังไม่ได้เชื่อมแผนลงทุน',
+    ivp_too_many_tests: 'ทดสอบได้ 3 ครั้งต่อ 10 นาที',
     not_in_room: 'คุณไม่ได้อยู่ในห้องนี้',
     room_ext_full: 'ห้องนี้มีส่วนขยายครบ 12 ตัวแล้ว เอาตัวที่ไม่ใช้ออกก่อน',
     trial_used: 'คุณทดลองใช้ส่วนขยายนี้ไปแล้ว',
@@ -804,6 +808,66 @@
     await loadRoom();
     openExtNotify();
   }
+
+  // ---------- 📈 แผนลงทุน: เชื่อมห้อง / ตั้งค่าแจ้งเตือนราคา ----------
+  async function linkInvest() {
+    const key = EXT.roomKey;
+    if (!key || !/^(g|d):/.test(key)) return toast('เชื่อมได้เฉพาะแชทกลุ่มและแชทสองคน', 'error');
+    const IV = kindExt('invest');
+    if (IV && !IV.can_use) return openPaywall(IV.id);
+    const grp = key.startsWith('g:');
+    const ok = await confirmDialog('เชื่อมแผนลงทุนกับห้องนี้',
+      `ส่งแจ้งเตือนราคาจากแผนของคุณเข้าห้องนี้:\n• 🛑 ถึง Stop-Loss · ⚠️ ใกล้ SL\n• 🎯 ถึงเป้าขายแต่ละขั้น (ขายกี่ % ขยับ SL ไปไหน)\n• 🟢 ลงถึงราคาเข้า · 💰 ถึงไม้ DCA\n• 🔺🔻 เบรกแนวต้าน/หลุดแนวรับ · ⚡ เปลี่ยนแรงในวัน\n• 📊 สรุปรายวัน 20:00\n\nห้ามรบกวน 23:00–07:00 (ยกเว้นถึง SL)${grp ? '\nกลุ่ม: ซ่อนตัวเลขเงินไว้ก่อน เปิดได้ในตั้งค่า' : ''}\nเชื่อมได้สูงสุด 3 ห้อง`, 'เชื่อม');
+    if (!ok) return;
+    const { error } = await sb.rpc('ivp_chat_link', { p_room: key });
+    if (error) return /ivp_locked/.test(error.message || '') && IV ? openPaywall(IV.id) : extErr(error);
+    toast('เชื่อมแผนลงทุนกับห้องนี้แล้ว', 'success');
+    await loadRoom();
+    openExtNotify();
+  }
+  async function renderIvpLinks(body, key) {
+    const IV = kindExt('invest');
+    if (!IV || !/^(g|d):/.test(key)) return;
+    const { data, error } = await sb.rpc('ivp_chat_room_info', { p_room: key });
+    if (error) return;   // ยังไม่ได้ติดตั้ง ivp-02
+    const i = data || {};
+    body.appendChild(el('div', 'list-title', '📈 แผนลงทุน (แจ้งเตือนราคาของคุณ)'));
+    if (!i.linked) {
+      body.appendChild(el('div', 'hint', 'ห้องนี้ยังไม่ได้รับแจ้งเตือนราคาจากแผนของคุณ'));
+      body.appendChild(actionBtn(IV.can_use ? '📈 เชื่อมแผนลงทุนกับห้องนี้' : '🔒 เชื่อมแผนลงทุน (ต้องซื้อหรือทดลองใช้)', () => { closeM('ext-notify-modal'); linkInvest(); }, 'secondary-btn'));
+      return;
+    }
+    const set = async (cfg) => { const { error: e } = await sb.rpc('ivp_chat_set', { p_room: key, p_cfg: cfg }); if (e) { extErr(e); return false; } return true; };
+    if (!i.ok) body.appendChild(el('div', 'hint', '⚠️ สิทธิ์แผนลงทุนหมดแล้ว แจ้งเตือนหยุดชั่วคราวจนกว่าจะต่ออายุ'));
+    body.appendChild(switchRow('ส่งแจ้งเตือนราคาเข้าห้องนี้', 'ถึง SL · เป้าขาย · ราคาเข้า · DCA · แนวรับ/ต้าน · เปลี่ยนแรง (เลือกต่อสินทรัพย์ในแอป)', i.on, v => set({ on: v })));
+    body.appendChild(switchRow('ซ่อนตัวเลขเงิน', 'แสดงแค่ราคาและสิ่งที่ต้องทำ ไม่บอกกำไร/ขาดทุน/ยอดเงิน (เหมาะกับกลุ่ม)', i.hide_money, v => set({ hide_money: v })));
+    const box = el('div', 'board-sched');
+    const ti = (v) => { const t = document.createElement('input'); t.type = 'time'; t.className = 'board-input'; t.value = v || ''; return t; };
+    box.appendChild(el('span', 'hint', 'สรุปรายวัน (เวลาไทย · ว่าง = ไม่ส่ง)'));
+    const dIn = ti(i.daily_at); box.appendChild(dIn);
+    box.appendChild(el('span', 'hint', 'ห้ามรบกวน ตั้งแต่ – ถึง (ว่าง = ไม่มี · ถึง SL ยังส่งเสมอ)'));
+    const qf = ti(i.quiet_from), qt = ti(i.quiet_to);
+    const qr = el('div', 'chip-row'); qr.append(qf, qt); box.appendChild(qr);
+    const sv = actionBtn('💾 บันทึกเวลา', async () => {
+      if (await set({ daily_at: dIn.value || '', quiet_from: qf.value || '', quiet_to: qt.value || '' })) toast('บันทึกแล้ว', 'success');
+    }, 'primary-btn');
+    sv.style.marginTop = '8px'; box.appendChild(sv);
+    body.appendChild(box);
+    body.appendChild(actionBtn('🔔 ส่งข้อความทดสอบ', async () => {
+      const { data: n, error: e } = await sb.rpc('ivp_alert_test');
+      if (e) return extErr(e);
+      toast(n ? 'ส่งทดสอบเข้า ' + n + ' ห้องแล้ว' : 'ไม่มีห้องที่เปิดรับ', 'success');
+    }, 'secondary-btn'));
+    body.appendChild(actionBtn('📈 เปิดแผนลงทุน', () => { closeM('ext-notify-modal'); launch(IV.id); }, 'secondary-btn'));
+    const un = actionBtn('ยกเลิกการเชื่อมแผนลงทุน', async () => {
+      if (!await confirmDialog('ยกเลิกการเชื่อม', 'ห้องนี้จะไม่ได้รับแจ้งเตือนราคาจากแผนของคุณอีก', 'ยกเลิกการเชื่อม', true)) return;
+      const { error: e } = await sb.rpc('ivp_chat_unlink', { p_room: key });
+      if (e) return extErr(e);
+      toast('ยกเลิกการเชื่อมแล้ว', 'info'); openExtNotify();
+    }, 'secondary-btn danger');
+    un.style.marginTop = '6px';
+    body.appendChild(un);
+  }
   // ---------- 🍽️ SmartTable: เชื่อมร้านกับห้อง / ตั้งค่าแจ้งเตือน ----------
   async function linkSmartTable() {
     const key = EXT.roomKey;
@@ -1281,6 +1345,7 @@
     });
     try { await renderGameLinks(body, key); } catch (x) { console.warn(x); }
     try { await renderStLinks(body, key); } catch (x) { console.warn(x); }
+    try { await renderIvpLinks(body, key); } catch (x) { console.warn(x); }
     const close = actionBtn('ปิด', () => closeM('ext-notify-modal'), 'primary-btn');
     close.style.marginTop = '16px';
     body.appendChild(close);
@@ -1408,7 +1473,7 @@
       const card = el('div', 'ext-msg ext-msg-' + (meta.type || 'info'));
       card.dataset.id = m.id;
       const head = el('div', 'ext-msg-head');
-      const KIND = { ledger: ['ledger', '🏠', 'สมุดบ้าน', 'เปิดสมุดบ้าน'], kidgame: ['kidgame', '🎮', 'เกมเด็ก', 'เปิดเกม'], board: ['board', '🎯', 'กระดาน 00–99', 'เปิดกระดาน'], smarttable: ['smarttable', '🍽️', 'SmartTable', 'เปิดร้าน'] }[meta.ext];
+      const KIND = { ledger: ['ledger', '🏠', 'สมุดบ้าน', 'เปิดสมุดบ้าน'], kidgame: ['kidgame', '🎮', 'เกมเด็ก', 'เปิดเกม'], board: ['board', '🎯', 'กระดาน 00–99', 'เปิดกระดาน'], smarttable: ['smarttable', '🍽️', 'SmartTable', 'เปิดร้าน'], invest: ['invest', '📈', 'แผนลงทุน', 'เปิดแผน'] }[meta.ext];
       const L = KIND ? kindExt(KIND[0]) : null;
       head.appendChild(iconNode(L || { icon: KIND ? KIND[1] : '🧩' }, 'ext-mini-icon'));
       head.appendChild(el('strong', '', KIND ? (L?.name || KIND[2]) : 'ส่วนขยาย'));
@@ -1551,21 +1616,24 @@
     const kKid = el('button', '', '🎮 เกมเด็ก');
     const kBoard = el('button', '', '🎯 กระดาน 00–99');
     const kSt = el('button', '', '🍽️ SmartTable');
-    [kLink, kLedger, kKid, kBoard, kSt].forEach(b => { b.type = 'button'; });
-    kseg.append(kLink, kLedger, kKid, kBoard, kSt);
+    const kIvp = el('button', '', '📈 แผนลงทุน');
+    [kLink, kLedger, kKid, kBoard, kSt, kIvp].forEach(b => { b.type = 'button'; });
+    kseg.append(kLink, kLedger, kKid, kBoard, kSt, kIvp);
     kseg.classList.add('kind-seg');
     const kHint = el('span', 'hint', '');
     const KH = { link: 'กดไอคอนแล้วเปิดลิงก์', ledger: 'ห้องที่เพิ่มส่วนขยายนี้ เชื่อมกับบ้านในสมุดบ้านได้: แจ้งเตือนเมื่อแก้ไข สรุป 20:00 และเตือนบิล',
       kidgame: 'เกมเด็ก: ไม่มีสิทธิ์ = เข้าเกมไม่ได้ (ลูกใช้สิทธิ์ของผู้ปกครอง) · เชื่อมห้องแล้วแจ้งผลทุกครั้งที่ลูกเล่นจบรอบ',
       board: 'กระดาน 00–99 (มหาเฮง): ไม่มีสิทธิ์ = ใช้กระดานไม่ได้ · เชื่อมห้องแล้วส่งสรุปงวดตามวัน-เวลาที่ตั้ง',
-      smarttable: 'SmartTable (ร้านอาหาร): สิทธิ์ของเจ้าของร้าน พนักงานใช้ตาม ลูกค้าสแกน QR ไม่ต้องมีสิทธิ์ · ไม่มีสิทธิ์ = สร้างร้าน/เปิดโต๊ะ/รับออร์เดอร์ไม่ได้' };
-    const setKind = v => { kind = v; [[kLink, 'link'], [kLedger, 'ledger'], [kKid, 'kidgame'], [kBoard, 'board'], [kSt, 'smarttable']].forEach(([b, k]) => b.classList.toggle('active', v === k));
+      smarttable: 'SmartTable (ร้านอาหาร): สิทธิ์ของเจ้าของร้าน พนักงานใช้ตาม ลูกค้าสแกน QR ไม่ต้องมีสิทธิ์ · ไม่มีสิทธิ์ = สร้างร้าน/เปิดโต๊ะ/รับออร์เดอร์ไม่ได้' ,
+      invest: 'แผนลงทุน: ไม่มีสิทธิ์ = เข้าแอปไม่ได้ (ส่งออกข้อมูลตัวเองได้) · เชื่อมห้องแล้วแจ้งเตือนราคาถึง SL / เป้าขาย / ราคาเข้า และสรุปรายวัน' };
+    const setKind = v => { kind = v; [[kLink, 'link'], [kLedger, 'ledger'], [kKid, 'kidgame'], [kBoard, 'board'], [kSt, 'smarttable'], [kIvp, 'invest']].forEach(([b, k]) => b.classList.toggle('active', v === k));
       kHint.textContent = KH[v] || ''; };
     kLink.onclick = () => setKind('link');
     kLedger.onclick = () => setKind('ledger');
     kKid.onclick = () => setKind('kidgame');
     kBoard.onclick = () => setKind('board');
     kSt.onclick = () => setKind('smarttable');
+    kIvp.onclick = () => setKind('invest');
     setKind(kind);
     body.append(el('div', 'list-title', 'ชนิดส่วนขยาย'), kseg, kHint);
 
@@ -2954,6 +3022,8 @@
       go('🛍 สั่งด่วน (SmartTable)', () => openStQuick());
       if (STX.can_use) go('🍽️ เชื่อม SmartTable (ร้านอาหาร) กับห้องนี้', linkSmartTable);
     }
+    const IV = kindExt('invest');
+    if (IV && EXT.roomKey && /^(g|d):/.test(EXT.roomKey)) go(IV.can_use ? '📈 เชื่อมแผนลงทุน (แจ้งเตือนราคา) กับห้องนี้' : '🔒 เชื่อมแผนลงทุนกับห้องนี้ (ต้องซื้อหรือทดลองใช้)', linkInvest);
     go('🔔 ตั้งค่าแจ้งเตือนส่วนขยาย', openExtNotify);
     go(usable.length ? '🛒 ร้านส่วนขยาย (ซื้อเพิ่ม)' : '🛒 ร้านส่วนขยาย', () => openExtStore());
     det.appendChild(body);
