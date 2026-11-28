@@ -237,3 +237,16 @@ body[data-mode="light"] .ext-badge.off { background: #e2e8f0; color: #334155; }
 .st-q-no { font-size: 2.4rem; font-weight: 800; color: var(--accent-color); margin: 4px 0; }
 .st-q-pick { display: flex; align-items: center; gap: 10px; padding: 8px 4px; border-bottom: 1px solid var(--border-color); }
 .st-q-pick span:nth-child(2) { flex: 1; }
+
+/* เมนู ⋮ > ส่วนขยาย: ปุ่มสี่เหลี่ยม 2 คอลัมน์ */
+.ext-tiles { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.ext-tile { display: flex !important; flex-direction: column; align-items: center; justify-content: center; gap: 2px; min-height: 84px; padding: 10px 8px !important; margin: 0 !important; width: 100%; text-align: center; line-height: 1.25; }
+.ext-tile:last-child:nth-child(odd) { grid-column: span 2; min-height: 64px; flex-direction: row; gap: 8px; }
+.ext-tile:last-child:nth-child(odd) .ext-tile-s { display: none; }
+.ext-tile-ic { font-size: 24px; line-height: 1; }
+.ext-tile-t { font-weight: 700; font-size: 15px; }
+.ext-tile-s { font-size: 11.5px; opacity: .7; }
+.ext-link-row { gap: 10px; padding: 10px 4px; }
+.ext-link-ic { font-size: 24px; width: 34px; text-align: center; flex: none; }
+.ext-link-tx { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.ext-link-tx small { font-size: 12px; opacity: .7; }

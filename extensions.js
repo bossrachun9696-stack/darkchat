@@ -705,6 +705,39 @@
     await loadRoom();
   }
 
+  // แอปที่เชื่อมกับห้องได้ (ใช้ในเมนู ⋮ > ส่วนขยาย > เชื่อมแอปกับห้องนี้)
+  function linkOptions() {
+    const out = [], L = ledgerExt(), KG = kindExt('kidgame'), BD = kindExt('board'), STX = kindExt('smarttable'), IV = kindExt('invest');
+    if (L) out.push({ ic: '🏠', name: 'สมุดบ้าน', sub: 'แจ้งเมื่อแก้รายรับรายจ่าย · สรุป 20:00 · เตือนบิล', ok: !!L.can_use, fn: linkLedger });
+    if (KG) out.push({ ic: '🎮', name: 'เกมเด็ก', sub: 'แจ้งคะแนนเมื่อลูกเล่นจบรอบ · แลกคูปอง', ok: !!KG.can_use, fn: linkKidGame });
+    if (BD) out.push({ ic: '🎯', name: 'กระดาน 00–99', sub: 'ส่งสรุปงวดตามวันเวลาที่ตั้ง', ok: !!BD.can_use, fn: linkBoard });
+    if (STX && STX.can_use) out.push({ ic: '🍽️', name: 'SmartTable (ร้านอาหาร)', sub: 'แจ้งออร์เดอร์ · เรียกพนักงาน · สั่งด่วนจากห้อง', ok: true, fn: linkSmartTable });
+    if (IV) out.push({ ic: '📈', name: 'แผนลงทุน', sub: 'แจ้งเตือนราคา SL · เป้าขาย · สรุป 20:00', ok: !!IV.can_use, fn: linkInvest });
+    return out;
+  }
+  function openLinkSheet() {
+    ensureModal('ext-link-modal', 'confirm-box');
+    const body = $('ext-link-modal-body');
+    body.innerHTML = '';
+    body.appendChild(el('h3', '', '🔗 เชื่อมแอปกับห้องนี้'));
+    body.appendChild(el('p', 'hint', 'เชื่อมแล้วแอปจะส่งแจ้งเตือนเข้าห้องนี้ · ดูหรือยกเลิกการเชื่อมได้ที่ 🔔 แจ้งเตือน'));
+    const st = el('div', 'stack');
+    linkOptions().forEach(o => {
+      const row = el('div', 'ext-room-row ext-link-row');
+      row.appendChild(el('span', 'ext-link-ic', o.ic));
+      const tx = el('div', 'ext-link-tx');
+      tx.append(el('b', '', o.name), el('small', '', o.sub));
+      row.appendChild(tx);
+      const b = chip2(o.ok ? 'เชื่อม' : '🔒 ปลดล็อก', () => { closeM('ext-link-modal'); o.fn(); });
+      b.className = o.ok ? 'chip primary' : 'chip';
+      row.appendChild(b);
+      st.appendChild(row);
+    });
+    st.appendChild(actionBtn('🔔 ตั้งค่าแจ้งเตือน / ยกเลิกการเชื่อม', () => { closeM('ext-link-modal'); openExtNotify(); }));
+    st.appendChild(actionBtn('ปิด', () => closeM('ext-link-modal')));
+    body.appendChild(st);
+    openModal('ext-link-modal');
+  }
   function openRoomExtSheet() {
     ensureModal('ext-room-modal', 'confirm-box');
     const body = $('ext-room-modal-body');
@@ -3007,25 +3040,26 @@
     det.open = true;
     det.appendChild(el('summary', '', '🧩 ส่วนขยาย'));
     const body = el('div', 'menu-group-body');
-    const go = (label, fn, cls) => body.appendChild(actionBtn(label, () => { closeModal('room-menu'); fn(); }, cls || 'secondary-btn'));
+    // จัดเป็นปุ่มสี่เหลี่ยม 2 คอลัมน์ · รายการย่อย (เพิ่มเข้าห้อง / เชื่อมแอป) อยู่ในหน้าถัดไป
+    const grid = el('div', 'ext-tiles');
+    const tile = (ic, label, sub, fn) => {
+      const b = document.createElement('button');
+      b.type = 'button'; b.className = 'secondary-btn ext-tile';
+      b.append(el('span', 'ext-tile-ic', ic), el('span', 'ext-tile-t', label));
+      if (sub) b.appendChild(el('span', 'ext-tile-s', sub));
+      b.onclick = () => { closeModal('room-menu'); fn(); };
+      grid.appendChild(b);
+    };
     const inRoom = EXT.roomExt.map(byId).filter(Boolean);
     const usable = EXT.list.filter(e => e.active && e.can_use && !EXT.roomExt.includes(e.id));
-    usable.forEach(e => go(`➕ เพิ่ม ${e.name} เข้าห้อง`, () => addToRoom(e.id)));
-    if (inRoom.length) go(`จัดการส่วนขยายในห้อง (${inRoom.length})`, openRoomExtSheet);
-    const L = ledgerExt();
-    if (L && EXT.roomKey && /^(g|d):/.test(EXT.roomKey)) go(L.can_use ? '🏠 เชื่อมสมุดบ้านกับห้องนี้' : '🔒 เชื่อมสมุดบ้านกับห้องนี้ (ต้องซื้อหรือทดลองใช้)', linkLedger);
-    const KG = kindExt('kidgame'), BD = kindExt('board');
-    if (KG && EXT.roomKey && /^(g|d):/.test(EXT.roomKey)) go(KG.can_use ? '🎮 เชื่อมเกมเด็กกับห้องนี้' : '🔒 เชื่อมเกมเด็กกับห้องนี้ (ต้องซื้อหรือทดลองใช้)', linkKidGame);
-    if (BD && EXT.roomKey && /^(g|d):/.test(EXT.roomKey)) go(BD.can_use ? '🎯 เชื่อมกระดาน 00–99 กับห้องนี้' : '🔒 เชื่อมกระดาน 00–99 กับห้องนี้ (ต้องซื้อหรือทดลองใช้)', linkBoard);
+    tile('🧩', 'ส่วนขยายในห้อง', [inRoom.length ? `มี ${inRoom.length}` : 'ยังไม่มี', usable.length ? `เพิ่มได้ ${usable.length}` : ''].filter(Boolean).join(' · '), openRoomExtSheet);
+    const links = (EXT.roomKey && /^(g|d):/.test(EXT.roomKey)) ? linkOptions() : [];
+    if (links.length) tile('🔗', 'เชื่อมแอปกับห้องนี้', `${links.length} แอป`, openLinkSheet);
     const STX = kindExt('smarttable');
-    if (STX && EXT.roomKey && /^(g|d):/.test(EXT.roomKey)) {
-      go('🛍 สั่งด่วน (SmartTable)', () => openStQuick());
-      if (STX.can_use) go('🍽️ เชื่อม SmartTable (ร้านอาหาร) กับห้องนี้', linkSmartTable);
-    }
-    const IV = kindExt('invest');
-    if (IV && EXT.roomKey && /^(g|d):/.test(EXT.roomKey)) go(IV.can_use ? '📈 เชื่อมแผนลงทุน (แจ้งเตือนราคา) กับห้องนี้' : '🔒 เชื่อมแผนลงทุนกับห้องนี้ (ต้องซื้อหรือทดลองใช้)', linkInvest);
-    go('🔔 ตั้งค่าแจ้งเตือนส่วนขยาย', openExtNotify);
-    go(usable.length ? '🛒 ร้านส่วนขยาย (ซื้อเพิ่ม)' : '🛒 ร้านส่วนขยาย', () => openExtStore());
+    if (STX && EXT.roomKey && /^(g|d):/.test(EXT.roomKey)) tile('🛍️', 'สั่งด่วน', 'SmartTable', () => openStQuick());
+    tile('🔔', 'แจ้งเตือน', 'ตั้งค่า · ยกเลิกการเชื่อม', openExtNotify);
+    tile('🛒', 'ร้านส่วนขยาย', usable.length ? 'ซื้อเพิ่ม' : 'ซื้อ · ทดลองใช้', () => openExtStore());
+    body.appendChild(grid);
     det.appendChild(body);
     const closeBtn = box.lastElementChild;   // ปุ่ม "ปิด" อยู่ท้ายสุด
     box.insertBefore(det, closeBtn);
